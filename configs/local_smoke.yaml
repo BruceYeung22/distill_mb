@@ -1,0 +1,39 @@
+# local_smoke.yaml — CPU smoke configuration.
+#
+# Used by stage 0 + Agent B for the first end-to-end "does it run"
+# check. Pure-numpy synthetic batches; no teacher weights loaded.
+# Real recipe values live in teacher_depth.yaml / student_pixel.yaml /
+# student_latent.yaml.
+
+experiment:
+  name: "local_smoke"
+  output_dir: "outputs/local_smoke"
+
+runtime:
+  seed: 0
+  device: "cpu"
+  precision: "fp32"        # BF16 is the server default; CPU only gets fp32
+
+data:
+  batch_size: 1
+  resolution: 512
+  split: "train"
+  synthetic: true           # use synthetic fixtures, not real data
+
+model:
+  branch: "depth"           # only the depth branch trains here (TDD §5.3)
+  depth_dropout: 0.0        # disable for smoke
+  use_pretrained_moebius: false  # synthetic does not need it
+
+training:
+  max_steps: 20
+  optimizer: "adamw"
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  grad_accum_steps: 1
+  amp: false
+
+evaluation:
+  enabled: true
+  max_cases: 4

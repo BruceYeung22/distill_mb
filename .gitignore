@@ -1,0 +1,73 @@
+# --- Python build / cache artifacts ---------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg
+*.egg-info/
+build/
+dist/
+.eggs/
+.installed.cfg
+*.egg-link
+
+# --- Test / type / lint caches --------------------------------------------
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyright_cache/
+.tox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.cache/
+
+# --- Virtual environments --------------------------------------------------
+.venv/
+venv/
+env/
+ENV/
+
+# --- Data, weights, caches, outputs, runs ---------------------------------
+# Anything local that comes from the host filesystem and is large or
+# non-portable. The package never reads from these implicitly.
+# Patterns are anchored to the repo root with a leading slash so they
+# do not swallow subpackages named `data` / `weights` / etc. (e.g.
+# `src/moebius_finetune/data/`).
+/data/
+/weights/
+/checkpoints/
+/cache/
+/outputs/
+/runs/
+/logs/
+
+# --- Editor / IDE ----------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Local scratch / secrets ----------------------------------------------
+.reasonix/
+.env
+.env.*
+!.env.example
+
+# --- Exported models (heavy binaries) -------------------------------------
+*.onnx
+*.rknn
+*.engine
+*.trt
+*.hef
+*.nb
+*.bin
+*.tflite
+*.pt
+*.pth
+*.safetensors
+*.npz

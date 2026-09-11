@@ -1,0 +1,63 @@
+# teacher_depth.yaml — depth-conditioned Moebius fine-tuning recipe.
+#
+# Owner: Agent B. Stage 0 only ships the schema so the config loader
+# can validate it. B is responsible for filling the per-key comments
+# and any additional structure needed by the training entry point.
+
+experiment:
+  name: "teacher_depth"
+  output_dir: "outputs/teacher_depth"
+
+runtime:
+  seed: 0
+  # BF16 is the default on the training server (TDD §5.3). Stage 0
+  # tests do not touch this; downstream code must check device
+  # support before enabling.
+  precision: "bf16"
+
+data:
+  batch_size: 1              # per-device; effective batch is grad_accum'd
+  resolution: 512
+  split: "train"
+
+model:
+  # Stage 1 (depth branch only) + Stage 2 (open backbone) — see TDD §5.3.
+  backbone: "moebius"
+  use_pretrained: true
+  pretrained_source: "moebius_upstream:ft_places2"
+  depth_dropout: 0.10        # 10% depth branch dropout (TDD §5.3)
+
+training:
+  # Two-stage recipe (TDD §5.3). Stage 1 freezes the backbone and only
+  # trains the depth branch. Stage 2 unfreezes the backbone at a lower
+  # learning rate.
+  stages:
+    - name: "depth_only"
+      max_steps: 2000
+      backbone_lr: 0.0
+      depth_branch_lr: 1.0e-4
+      optimizer: "adamw"
+      weight_decay: 0.01
+      max_grad_norm: 1.0
+      grad_accum_steps: 8
+    - name: "open_backbone"
+      max_steps: 18000
+      backbone_lr: 1.0e-5
+      depth_branch_lr: 1.0e-4
+      optimizer: "adamw"
+      weight_decay: 0.01
+      max_grad_norm: 1.0
+      grad_accum_steps: 8
+  amp: true
+  gradient_checkpointing: true
+
+evaluation:
+  enabled: true
+  eval_every_steps: 1000
+  splits: ["holdout_masks", "holdout_images"]
+
+# Placeholders so the loader can validate the schema. B will extend.
+checkpoints:
+  init_from: "moebius_upstream:ft_places2"
+  save_every_steps: 2000
+  keep_last: 3

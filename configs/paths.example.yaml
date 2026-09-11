@@ -1,0 +1,34 @@
+# Path registry for moebius-finetune.
+#
+# This file is a PLACEHOLDER. Real paths are environment-specific and
+# must NOT be committed. Copy it to `paths.local.yaml` (which is
+# git-ignored) and edit there.
+#
+# Any loader that consumes this config must reject paths it does not
+# see here. The package never reads unlisted weights or data.
+
+# Host-side roots. Defaults reflect the current dev box layout; change
+# per environment. Use forward slashes; YAML escapes are avoided.
+data_root:      "D:/datasets/moebius_finetune"
+weights_root:   "D:/datasets/moebius_finetune/weights"
+cache_root:     "D:/datasets/moebius_finetune/cache"
+output_root:    "D:/datasets/moebius_finetune/outputs"
+
+# Upstream repositories checked out side-by-side with the package.
+moebius_upstream:    "D:/project/Moebius"
+# Pinned commit for Moebius (TDD §2.1). Bootstrap scripts verify SHA256.
+moebius_commit:      "b88d462bacb9af6e7128a3b4cc4a07418bedfd61"
+
+# ZipDepth: weights used by Agent A when generating GRT depth.
+zipdepth_checkpoint: "D:/project/zipdepth/checkpoints/base.pt"
+
+# Hami: read-only reference data and code (we do NOT depend on its
+# runtime). The grt package is consumed as a pure function with a
+# matching test mirror; see TDD §2.2.
+hami_data_root:      "D:/project/Hami/data"
+
+# Optional: per-split subdirectories. Loaded by Agent A's data code.
+splits:
+  train:           "train"
+  holdout_masks:   "holdout_masks"
+  holdout_images:  "holdout_images"

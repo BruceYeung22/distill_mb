@@ -1,0 +1,51 @@
+# student_pixel.yaml — PixelStudent-v0 recipe (TDD §6.2).
+#
+# Owner: Agent C. Stage 0 ships the skeleton only; C will fill in
+# detailed comments and the per-stage distillation schedule.
+
+experiment:
+  name: "student_pixel"
+  output_dir: "outputs/student_pixel"
+
+runtime:
+  seed: 0
+  precision: "bf16"
+
+data:
+  batch_size: 1
+  resolution: 512
+  # Pixel student consumes cached teacher outputs. The cache manifest
+  # is produced by Agent B's cache-teacher entry point.
+  cache_manifest: "cache/teacher_cache/manifest.json"
+
+model:
+  arch: "pixel_student_v0"
+  # Widths / block counts from TDD §6.2. Kept here as a reference; the
+  # model code reads the values from its own constants, not from yaml.
+  encoder_widths: [24, 48, 96]
+  encoder_blocks: [1, 2, 3]
+  bottleneck_width: 160
+  bottleneck_blocks: 4
+  decoder_widths: [96, 48, 24]
+  decoder_blocks: [2, 2, 1]
+
+training:
+  max_steps: 20             # placeholder; real length set by C
+  optimizer: "adamw"
+  lr: 1.0e-4
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  grad_accum_steps: 8
+  amp: true
+  # First-version loss: hole L1 to teacher + to GT + 0.1 * boundary
+  # gradient L1 (TDD §7.2).
+  loss:
+    hole_l1_teacher: 1.0
+    hole_l1_gt: 1.0
+    boundary_grad_l1: 0.1
+    include_lpips: false
+
+evaluation:
+  enabled: true
+  splits: ["holdout_masks", "holdout_images"]
+  seeds: [0]                # 0..3 stability report is C's responsibility

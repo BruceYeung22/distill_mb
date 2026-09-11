@@ -1,0 +1,76 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "moebius-finetune"
+version = "0.0.1"
+description = "DIBR hole-filling on RK3588 INT8 via depth-conditioned Moebius teacher and a one-step distilled student; source-coordinate GRT protocol."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Internal" }
+authors = [
+    { name = "moebius-finetune maintainers" },
+]
+keywords = ["dibr", "inpainting", "depth", "moebius", "rknn", "rk3588", "distillation"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# Agent A: data preparation, GRT generation, manifest, evaluation
+data = [
+    # Populated by Agent A. Stage 0 only declares the group so the
+    # entry point is already addressable.
+]
+# Agent B: teacher fine-tuning + cache generation
+teacher = [
+    # Populated by Agent B.
+]
+# Agent C: students + codec + training
+student = [
+    # Populated by Agent C.
+]
+# Agent C: ONNX / RKNN export
+deploy = [
+    # Populated by Agent C.
+]
+# Local development & CI
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+]
+
+[project.scripts]
+moebius-finetune-prepare-data = "moebius_finetune.cli:prepare_data"
+moebius-finetune-train-teacher = "moebius_finetune.cli:train_teacher"
+moebius-finetune-cache-teacher = "moebius_finetune.cli:cache_teacher"
+moebius-finetune-train-codec = "moebius_finetune.cli:train_codec"
+moebius-finetune-train-student = "moebius_finetune.cli:train_student"
+moebius-finetune-evaluate = "moebius_finetune.cli:evaluate"
+moebius-finetune-profile = "moebius_finetune.cli:profile"
+moebius-finetune-export = "moebius_finetune.cli:export"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"moebius_finetune" = ["py.typed"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
