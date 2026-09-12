@@ -87,11 +87,18 @@ def test_pick_cases_deterministic_subset():
 
 def test_aggregate_rows_composite():
     rows = [
-        {"hole_l1": 0.1, "hole_lpips": 0.2, "global_l1": 0.05, "hole_ratio": 0.1},
-        {"hole_l1": 0.2, "hole_lpips": 0.4, "global_l1": 0.15, "hole_ratio": 0.3},
+        {
+            "hole_l1": 0.1, "hole_lpips": 0.2, "global_l1": 0.05,
+            "hole_ratio": 0.1, "known_max_error": 0.0,
+        },
+        {
+            "hole_l1": 0.2, "hole_lpips": 0.4, "global_l1": 0.15,
+            "hole_ratio": 0.3, "known_max_error": 0.0,
+        },
     ]
     s = aggregate_rows(rows)
     assert s["n"] == 2
     assert abs(s["hole_l1"] - 0.15) < 1e-9
+    assert s["known_max_error"] == 0.0
     # S = 1*0.3 + 3*0.15 + 1*0.10
     assert abs(s["S"] - (0.3 + 0.45 + 0.10)) < 1e-9
