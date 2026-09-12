@@ -27,6 +27,8 @@ __all__ = [
     "boundary_l1",
     "hole_psnr",
     "known_max_error",
+    "hole_l1",
+    "global_l1",
 ]
 
 
@@ -197,8 +199,7 @@ def known_max_error(
     """Maximum per-pixel L1 error in the known (non-hole) region.
 
     Empty masks return 0.0. If there is no known region (full
-    hole), also returns 0.0.
-    """
+    hole), also returns 0.0.    """
     p = _ensure_4d(pred, "pred")
     t = _ensure_4d(target, "target")
     m = _ensure_mask_4d(mask, "mask")
@@ -220,6 +221,40 @@ def known_max_error(
     if not valid.any():
         return 0.0
     return float(out[valid].max())
+
+
+def hole_l1(
+    pred: np.ndarray,
+    target: np.ndarray,
+    mask: np.ndarray,
+) -> float:
+    """Per-case normalised hole L1, averaged over the batch (TDD2 §5).
+
+    Semantics match ``training.student.losses.hole_l1``: each case
+    contributes ``sum(|pred-target|·mask) / max(sum(mask)·3, 1)``; empty
+    cases contribute 0. ``pred``/``target`` are ``[B,3,H,W]`` and
+    ``mask`` ``[B,1,H,W]`` in {0,1}; all in [0,1].
+    """
+    p = _ensure_4d(pred, "pred").astype(np.float64, copy=False)
+    t = _ensure_4d(target, "target").astype(np.float64, copy=False)
+    m = _ensure_mask_4d(mask, "mask").astype(np.float64, copy=False)
+    if p.shape != t.shape:
+        raise ValueError(f"pred shape {p.shape} != target shape {t.shape}")
+    diff = np.abs(p - t) * m
+    b = p.shape[0]
+    denom = np.maximum(m.reshape(b, -1).sum(axis=1) * 3.0, 1.0)
+    numer = diff.reshape(b, -1).sum(axis=1)
+    per_case = np.where(m.reshape(b, -1).sum(axis=1) > 0, numer / denom, 0.0)
+    return float(per_case.mean())
+
+
+def global_l1(pred: np.ndarray, target: np.ndarray) -> float:
+    """Full-image mean |pred - target| (TDD2 §5/D5, composed-image domain)."""
+    p = _ensure_4d(pred, "pred").astype(np.float64, copy=False)
+    t = _ensure_4d(target, "target").astype(np.float64, copy=False)
+    if p.shape != t.shape:
+        raise ValueError(f"pred shape {p.shape} != target shape {t.shape}")
+    return float(np.abs(p - t).mean())
 
 
 def _make_band(mask2d: np.ndarray, band_px: int) -> np.ndarray:

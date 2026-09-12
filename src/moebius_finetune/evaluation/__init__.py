@@ -13,6 +13,8 @@ Owned by Agent A. Provides:
 from .metrics import (
     aggregate_per_case,
     boundary_l1,
+    global_l1,
+    hole_l1,
     hole_psnr,
     known_max_error,
 )
@@ -22,6 +24,8 @@ from .evaluator import (
     run_dummy_predictor,
 )
 from .plots import plot_comparison_grid
+from .lpips_masked import masked_lpips
+from .teacher_eval import aggregate_rows, pick_cases, run_evaluation
 
 
 __all__ = [
@@ -33,4 +37,8 @@ __all__ = [
     "evaluate_manifest",
     "run_dummy_predictor",
     "plot_comparison_grid",
+    "masked_lpips",
+    "pick_cases",
+    "aggregate_rows",
+    "run_evaluation",
 ]
