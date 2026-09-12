@@ -55,17 +55,17 @@ def test_two_plane_l():
 
 
 # ---------------------------------------------------------------------------
-# 2. Flat depth (all equal): no holes anywhere — ties survive.
+# 2. Flat depth (all equal): only the OOB columns are holes, ties survive.
 # ---------------------------------------------------------------------------
 
 
-def test_flat_ties_no_holes_r():
+def test_flat_ties_r():
     H, W = REF["flat_ties"]["shape"]
     got = compute_grt_mask((H, W), _disparity("flat_ties"), Direction.R2L, dmax_px=1)
     np.testing.assert_array_equal(got, _mask_array("flat_ties", "R"))
 
 
-def test_flat_ties_no_holes_l():
+def test_flat_ties_l():
     H, W = REF["flat_ties"]["shape"]
     got = compute_grt_mask((H, W), _disparity("flat_ties"), Direction.L2R, dmax_px=1)
     np.testing.assert_array_equal(got, _mask_array("flat_ties", "L"))
@@ -78,9 +78,6 @@ def test_perfectly_flat_zero_disparity_has_no_holes():
     d = np.zeros((4, 4), dtype=np.float32)
     for direction in (Direction.R2L, Direction.L2R):
         got = compute_grt_mask((4, 4), d, direction, dmax_px=1)
-        # All-zero disparity projects to x -> x, so only the rightmost (R)
-        # or leftmost (L) columns are oob for shift=0. There are no shifts.
-        # Actually for d=0, t = x, all valid, no occl. Should be all False.
         assert not got.any(), f"flat d=0 {direction} should have no holes, got {got.sum()}"
 
 
