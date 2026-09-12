@@ -23,9 +23,12 @@ def _candidate_roots() -> list[Path]:
     env = os.environ.get("MOEBIUS_UPSTREAM_DIR")
     if env:
         roots.append(Path(env))
-    # The dev box's Moebius checkout, in both WSL and Windows form.
+    # The dev box's Moebius checkout. The DGX Spark box keeps it at
+    # /home/dog/project/moebius_distill/Moebius; the older WSL box used
+    # the /mnt/d or D:/ forms.
     roots.extend(
         [
+            Path("/home/dog/project/moebius_distill/Moebius"),
             Path("/mnt/d/project/moebius_distill/Moebius"),
             Path("D:/project/moebius_distill/Moebius"),
             Path("D:/project/Moebius"),
@@ -45,16 +48,25 @@ def moebius_upstream_dir() -> Path:
 def moebius_weight_path() -> Optional[Path]:
     """Resolve the on-disk weight file for the tests.
 
-    The pinned commit (``b88d462b...``) ships the model under
-    ``weight/Moebius/ft_places2/diffusion_pytorch_model.bin`` on the
-    dev box. The earlier spec said ``Moebius/pretrained/ft_places2.pt``
-    which is the same checkpoint under a different name; we accept
-    either path.
+    ``MOEBIUS_WEIGHTS_PATH`` overrides everything when set. Otherwise we
+    probe the layouts we have seen on real boxes:
+
+    * ``weights/moebius/pretrained/diffusion_pytorch_model.bin`` — the
+      pretrained checkpoint as checked out on the DGX Spark box
+      (aarch64/CUDA 13).
+    * ``weight/Moebius/ft_places2/diffusion_pytorch_model.bin`` — the
+      upstream release layout documented in the Moebius README.
+    * ``pretrained/ft_places2.pt`` — the earlier spec's path; the same
+      checkpoint under a different name.
     """
+    override = os.environ.get("MOEBIUS_WEIGHTS_PATH")
+    if override and Path(override).is_file():
+        return Path(override)
     for upstream in _candidate_roots():
         if not upstream.is_dir():
             continue
         candidates = [
+            upstream / "weights/moebius/pretrained/diffusion_pytorch_model.bin",
             upstream / "weight/Moebius/ft_places2/diffusion_pytorch_model.bin",
             upstream / "pretrained/ft_places2.pt",
             upstream / "weight/Moebius/ft_places2/ft_places2.pt",

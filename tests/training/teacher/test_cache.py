@@ -260,13 +260,15 @@ def test_cache_key_mismatch_raises(moebius_weights_path):
             )
         seen[entry.case_id] = entry
 
-    cache_teacher_outputs(
-        wrapped, case_list=["c1"], seed_list=[0],
-        scheduler_cfg=cfg, data_version="v0",
-        teacher_checkpoint_sha256="hashA", moebius_commit="m",
-        vae=vae, case_batch_builder=_synthetic_batch_builder,
-        on_case=on_case,
-    )
+    with pytest.raises(CacheKeyMismatchError):
+        cache_teacher_outputs(
+            wrapped, case_list=["c1"], seed_list=[0],
+            scheduler_cfg=cfg, data_version="v0",
+            teacher_checkpoint_sha256="hashA", moebius_commit="m",
+            vae=vae, case_batch_builder=_synthetic_batch_builder,
+            on_case=on_case,
+        )
+    assert seen == {}
 
 
 def test_cache_does_not_read_target(moebius_weights_path):

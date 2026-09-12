@@ -25,6 +25,7 @@ classifiers = [
 dependencies = [
     "numpy>=1.24",
     "pyyaml>=6.0",
+    "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
@@ -49,6 +50,11 @@ deploy = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+]
+# Teacher evaluation: pixel-domain masked LPIPS (TDD2 §5/D4)
+eval = [
+    "lpips>=0.1.4",
+    "torchvision",
 ]
 
 [project.scripts]

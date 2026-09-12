@@ -16,6 +16,7 @@ def _candidate_roots() -> list[Path]:
         roots.append(Path(env))
     roots.extend(
         [
+            Path("/home/dog/project/moebius_distill/Moebius"),
             Path("/mnt/d/project/moebius_distill/Moebius"),
             Path("D:/project/moebius_distill/Moebius"),
         ]
@@ -24,10 +25,14 @@ def _candidate_roots() -> list[Path]:
 
 
 def moebius_weight_path() -> Optional[Path]:
+    override = os.environ.get("MOEBIUS_WEIGHTS_PATH")
+    if override and Path(override).is_file():
+        return Path(override)
     for upstream in _candidate_roots():
         if not upstream.is_dir():
             continue
         for cand in [
+            upstream / "weights/moebius/pretrained/diffusion_pytorch_model.bin",
             upstream / "weight/Moebius/ft_places2/diffusion_pytorch_model.bin",
             upstream / "pretrained/ft_places2.pt",
         ]:

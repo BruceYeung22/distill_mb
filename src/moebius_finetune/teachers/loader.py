@@ -68,21 +68,23 @@ def _moebius_upstream_dir() -> Path:
     """Locate the Moebius upstream checkout.
 
     Looks at ``MOEBIUS_UPSTREAM_DIR`` (the package never reads unlisted
-    paths) and falls back to common dev-box locations:
-    ``/mnt/d/project/moebius_distill/Moebius`` (WSL form) and
-    ``D:/project/moebius_distill/Moebius`` (Windows form).
+    paths) and falls back to common dev-box locations: the DGX Spark
+    checkout ``/home/dog/project/moebius_distill/Moebius``, then the
+    older WSL form ``/mnt/d/project/moebius_distill/Moebius`` and the
+    Windows form ``D:/project/moebius_distill/Moebius``.
     """
     env = os.environ.get("MOEBIUS_UPSTREAM_DIR")
     if env and Path(env).is_dir():
         return Path(env)
     for cand in (
+        Path("/home/dog/project/moebius_distill/Moebius"),
         Path("/mnt/d/project/moebius_distill/Moebius"),
         Path("D:/project/moebius_distill/Moebius"),
         Path("D:/project/Moebius"),
     ):
         if cand.is_dir():
             return cand
-    return Path("D:/project/moebius_distill/Moebius")
+    return Path("/home/dog/project/moebius_distill/Moebius")
 
 
 def _removal_model_class():
@@ -248,6 +250,34 @@ def sha256_of_file(weights_path: Union[str, os.PathLike]) -> str:
         for chunk in iter(lambda: f.read(1 << 20), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def load_vae(vae_dir: Union[str, os.PathLike]) -> Any:
+    """Load the frozen Moebius VAE (AutoencoderKL) from a local dir.
+
+    The VAE is returned in ``eval()`` mode with every parameter set to
+    ``requires_grad=False`` — the fine-tune and cache paths only ever
+    run inference through it.
+    """
+    try:
+        from diffusers import AutoencoderKL  # type: ignore[import-not-found]
+    except Exception as exc:  # pragma: no cover - depends on host
+        raise WeightLoadError(
+            f"diffusers is required to load the VAE from {vae_dir}: {exc}"
+        ) from exc
+    path = Path(vae_dir)
+    if not (path / "config.json").is_file():
+        raise WeightLoadError(
+            f"VAE config not found at {path / 'config.json'}"
+        )
+    try:
+        vae = AutoencoderKL.from_pretrained(str(path), local_files_only=True)
+    except Exception as exc:
+        raise WeightLoadError(f"Failed to load VAE from {path}: {exc}") from exc
+    vae.eval()
+    for p in vae.parameters():
+        p.requires_grad_(False)
+    return vae
 
 
 def get_weight_metadata(

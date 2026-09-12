@@ -57,6 +57,7 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+configs/paths.local.yaml
 
 # --- Exported models (heavy binaries) -------------------------------------
 *.onnx
