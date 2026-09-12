@@ -32,6 +32,18 @@ from .splits import (
 )
 from .synthetic import make_synthetic_batch
 from .pipeline_512 import build_512_sample, prepare_512_sample
+from .grt_dataset import (
+    CaseSpec,
+    GrtTrainProvider,
+    ZipDepthOnline,
+    build_case,
+    build_manifest,
+    hole_ratio_of,
+    list_image_ids,
+    load_manifest,
+    resolve_zipdepth_dir,
+    save_manifest,
+)
 
 
 __all__ = [
@@ -62,4 +74,13 @@ __all__ = [
     # pipeline
     "build_512_sample",
     "prepare_512_sample",
+    # online ZipDepth + GRT dataset (TDD2 §3)
+    "CaseSpec",
+    "ZipDepthOnline",
+    "build_case",
+    "build_manifest",
+    "GrtTrainProvider",
+    "hole_ratio_of",
+    "list_image_ids",
+    "resolve_zipdepth_dir",
 ]
