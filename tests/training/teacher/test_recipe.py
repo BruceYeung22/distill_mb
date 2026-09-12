@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from moebius_finetune.training.teacher.recipe import (
+    ConvInUnfreezeRecipe,
     DepthBranchOnlyRecipe,
     JointUnfreezeRecipe,
     LocalSmokeRecipe,
@@ -18,6 +19,7 @@ def test_depth_branch_only_defaults():
     s = r.stage()
     assert s.max_steps == 2000
     assert s.backbone_lr == 0.0
+    assert s.conv_in_lr == 0.0
     assert s.depth_branch_lr == 1e-4
     assert s.optimizer == "adamw"
     assert s.weight_decay == 0.01
@@ -30,6 +32,35 @@ def test_joint_unfreeze_defaults():
     assert s.max_steps == 18000
     assert s.backbone_lr == 1e-5
     assert s.depth_branch_lr == 1e-4
+    # conv_in follows the backbone lr on the full-open path.
+    assert s.conv_in_lr == 1e-5
+
+
+def test_conv_in_unfreeze_defaults():
+    """TDD2 D2: stage 2 unfreezes ONLY conv_in; backbone stays at 0."""
+    r = ConvInUnfreezeRecipe()
+    s = r.stage()
+    assert s.name == "unfreeze_conv_in"
+    assert s.max_steps == 18000
+    assert s.backbone_lr == 0.0
+    assert s.conv_in_lr == 1e-5
+    assert s.depth_branch_lr == 1e-4
+
+
+def test_recipe_from_yaml_conv_in_unfreeze():
+    cfg = {
+        "kind": "unfreeze_conv_in",
+        "steps": 555,
+        "branch_lr": 5e-4,
+        "conv_in_lr": 2e-5,
+    }
+    r = recipe_from_yaml_dict(cfg)
+    assert isinstance(r, ConvInUnfreezeRecipe)
+    s = r.stage()
+    assert s.max_steps == 555
+    assert s.depth_branch_lr == 5e-4
+    assert s.conv_in_lr == 2e-5
+    assert s.backbone_lr == 0.0
 
 
 def test_local_smoke_defaults():

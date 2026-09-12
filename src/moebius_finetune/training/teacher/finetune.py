@@ -213,25 +213,37 @@ def _split_param_groups(
 ) -> List[Dict[str, Any]]:
     """Return AdamW parameter groups honouring the stage learning rates.
 
-    The depth adapter always trains. The backbone trains only when
-    ``stage.backbone_lr > 0`` (Stage 2). In Stage 1 we explicitly
-    freeze the backbone by setting ``requires_grad=False`` on every
-    parameter outside the depth adapter; this is the contract
-    asserted by ``test_stage1_only_trains_depth_adapter``.
+    Three groups (TDD2 §5):
+
+    * ``depth_branch`` — the depth adapter; always trains.
+    * ``conv_in`` — trains only when ``stage.conv_in_lr > 0`` (TDD2 D2:
+      stage 2 unfreezes *only* conv_in; the rest of the backbone stays
+      frozen for the whole run).
+    * ``backbone`` — everything else in the backbone; trains only when
+      ``stage.backbone_lr > 0``.
+
+    ``requires_grad`` is forced to match the lr gates so the optimizer
+    and the test assertions agree.
     """
     branch_params: List[nn.Parameter] = list(model.depth_adapter.parameters())
+    conv_in = _get_conv_in(model)
+    conv_in_params: List[nn.Parameter] = (
+        list(conv_in.parameters()) if conv_in is not None else []
+    )
+    conv_in_ids = {id(p) for p in conv_in_params}
     backbone_params: List[nn.Parameter] = [
-        p for p in model.model.parameters() if p is not None
+        p for p in model.model.parameters() if id(p) not in conv_in_ids
     ]
-    # Force the contract: when stage 1 (backbone_lr=0) we explicitly
-    # disable gradient on the backbone so the optimizer and the
-    # test assertion both agree.
+    # Force the contract: each group's requires_grad matches its lr gate.
     for p in backbone_params:
         p.requires_grad = bool(stage.backbone_lr > 0.0)
+    for p in conv_in_params:
+        p.requires_grad = bool(stage.conv_in_lr > 0.0)
     for p in branch_params:
         p.requires_grad = True
-    branch_params = [p for p in branch_params if p.requires_grad]
     backbone_params = [p for p in backbone_params if p.requires_grad]
+    conv_in_params = [p for p in conv_in_params if p.requires_grad]
+    branch_params = [p for p in branch_params if p.requires_grad]
     groups: List[Dict[str, Any]] = []
     if backbone_params and stage.backbone_lr > 0.0:
         groups.append(
@@ -239,6 +251,14 @@ def _split_param_groups(
                 "params": backbone_params,
                 "lr": float(stage.backbone_lr),
                 "name": "backbone",
+            }
+        )
+    if conv_in_params and stage.conv_in_lr > 0.0:
+        groups.append(
+            {
+                "params": conv_in_params,
+                "lr": float(stage.conv_in_lr),
+                "name": "conv_in",
             }
         )
     if branch_params:
@@ -258,6 +278,13 @@ def _split_param_groups(
     for g in groups:
         g["weight_decay"] = float(stage.weight_decay)
     return groups
+
+
+def _get_conv_in(model: nn.Module) -> Optional[nn.Module]:
+    """Return ``model.model.diff_model.conv_in`` when the path exists."""
+    inner = getattr(model, "model", None)
+    diff = getattr(inner, "diff_model", None)
+    return getattr(diff, "conv_in", None)
 
 
 # ---------------------------------------------------------------------------
@@ -465,6 +492,13 @@ def finetune_depth_branch(
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats(device)
 
+    # Alphas for the q_sample noising — from the same scheduler config
+    # the cache/inference path uses, so train and eval spaces match.
+    from .cache import default_scheduler_config, _build_ddim_scheduler
+
+    train_ddim = _build_ddim_scheduler(default_scheduler_config())
+    alphas_bar = train_ddim.alphas_cumprod.to(device=device, dtype=torch.float32)
+
     best_loss = float("inf")
     accum_count = 0
     for step in range(1, int(stage.max_steps) + 1):
@@ -479,6 +513,7 @@ def finetune_depth_branch(
             amp_dtype=amp_dtype,
             max_grad_norm=float(stage.max_grad_norm),
             known_weight=0.1,
+            alphas_bar=alphas_bar,
         )
         accum_count += 1
         if accum_count >= int(stage.grad_accum_steps):
@@ -547,17 +582,29 @@ def _save_checkpoint(
     name = CHECKPOINT_BASENAME.format(step=global_step)
     path = output_dir / name
 
-    # Model state: only the depth adapter in Stage 1; everything in
-    # Stage 2 (TDD §5.3: "保存：模型 state_dict（只 depth adapter 在
-    # 阶段 1）").
-    is_stage1 = stage.backbone_lr == 0.0
-    if isinstance(model, DepthConditionedRemoval):
-        if is_stage1:
-            model_state = {f"depth_adapter.{k}": v for k, v in model.depth_adapter.state_dict().items()}
-        else:
-            model_state = model.state_dict()
+    # Save exactly the trainable subset (TDD2 §5): adapter when it
+    # trains, conv_in when it unfreezes, the full state_dict only when
+    # the backbone lr opens.
+    trainable_parts: List[str] = []
+    model_state: Dict[str, Any] = {}
+    if isinstance(model, DepthConditionedRemoval) and hasattr(model, "depth_adapter"):
+        if stage.depth_branch_lr > 0.0:
+            model_state.update(
+                {f"depth_adapter.{k}": v for k, v in model.depth_adapter.state_dict().items()}
+            )
+            trainable_parts.append("depth_adapter")
+        conv_in = _get_conv_in(model)
+        if conv_in is not None and stage.conv_in_lr > 0.0:
+            model_state.update(
+                {f"model.diff_model.conv_in.{k}": v for k, v in conv_in.state_dict().items()}
+            )
+            trainable_parts.append("conv_in")
+        if stage.backbone_lr > 0.0:
+            model_state = dict(model.state_dict())
+            trainable_parts.append("backbone")
     else:
-        model_state = model.state_dict()
+        model_state = dict(model.state_dict())
+        trainable_parts.append("backbone")
 
     payload: Dict[str, Any] = {
         "version": CHECKPOINT_VERSION,
@@ -565,7 +612,8 @@ def _save_checkpoint(
         "stage": stage.to_dict(),
         "model_state": model_state,
         "model_class": type(model).__name__,
-        "is_depth_adapter_only": bool(is_stage1),
+        "is_depth_adapter_only": bool(trainable_parts == ["depth_adapter"]),
+        "trainable_parts": list(trainable_parts),
         "optimizer_state": optimizer.state_dict(),
         "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
         "rng_state": rng_state,
@@ -659,6 +707,22 @@ def _states_equal(a: Any, b: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _q_sample(
+    x0: torch.Tensor,
+    eps: torch.Tensor,
+    alphas_bar: torch.Tensor,
+    timesteps: torch.Tensor,
+) -> torch.Tensor:
+    """Standard DDPM forward noising: ``√ᾱ_t·x0 + √(1-ᾱ_t)·ε``.
+
+    ``alphas_bar`` is the 1-D ``alphas_cumprod`` tensor (already on the
+    target device); ``timesteps`` is ``[B]`` int64.
+    """
+    ab = alphas_bar.to(device=x0.device, dtype=torch.float32)[timesteps]
+    ab = ab.view(-1, 1, 1, 1)
+    return ab.sqrt() * x0 + (1.0 - ab).sqrt() * eps
+
+
 def _train_step(
     *,
     model: DepthConditionedRemoval,
@@ -670,6 +734,7 @@ def _train_step(
     amp_dtype: Optional[torch.dtype],
     max_grad_norm: float,
     known_weight: float,
+    alphas_bar: torch.Tensor,
 ) -> TrainResult:
     """One optimizer step (no parameter update happens here)."""
     def _to_tensor(value: Any, name: str) -> torch.Tensor:
@@ -722,16 +787,37 @@ def _train_step(
     # Depth features at H/8: coverage + depth-mean.
     depth_features = _default_depth_features(hole_mask, depth_hole)
 
-    # Sample a random timestep in [0, 1000).
+    # Sample a random timestep in [0, 1000) and build the noised clean
+    # target latent (TDD2 §5, corrected objective): the model sees
+    # [x_t, latent_mask, masked_latent] and predicts ε. The previous
+    # implementation fed pure noise with target ε — a degenerate
+    # identity objective that trains nothing.
     timesteps = torch.randint(
         0, 1000, (B,), dtype=torch.int64, device=device
     )
 
-    # Build the ground-truth epsilon. For training the loss compares
-    # the model's noise prediction against ``noise``; we do not need a
-    # separate scheduler step.
-    latent_input = torch.cat([noise, latent_mask, masked_latent], dim=1)
-    target_eps = noise  # scheduler uses pure noise as epsilon target.
+    if batch.get("clean_latent") is not None:
+        cl = batch["clean_latent"]
+        if isinstance(cl, torch.Tensor):
+            x0 = cl.to(device=device, dtype=torch.float32)
+        elif isinstance(cl, np.ndarray):
+            x0 = torch.from_numpy(np.ascontiguousarray(cl)).to(
+                device=device, dtype=torch.float32
+            )
+        else:
+            raise FinetuneConfigError(
+                f"batch['clean_latent'] must be tensor or ndarray, got {type(cl).__name__}"
+            )
+    else:
+        # The full clean target image (not masked) provides x0.
+        clean_pm1 = (2.0 * clean_rgb - 1.0).to(device=device, dtype=torch.float32)
+        x0 = _encode_masked_latent(clean_pm1, vae, device, amp, amp_dtype)
+
+    eps = noise
+    noisy = _q_sample(x0, eps, alphas_bar, timesteps)
+
+    latent_input = torch.cat([noisy, latent_mask, masked_latent], dim=1)
+    target_eps = eps
 
     optimizer.zero_grad(set_to_none=True)
     if amp and amp_dtype is not None:

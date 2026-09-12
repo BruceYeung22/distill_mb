@@ -14,10 +14,14 @@ from moebius_finetune.teachers.loader import get_weight_metadata, load_removal_m
 from moebius_finetune.teachers.wrapper import DepthConditionedRemoval
 from moebius_finetune.training.teacher.finetune import (
     FinetuneConfigError,
+    _q_sample,
     finetune_depth_branch,
     verify_resume_consistency,
 )
-from moebius_finetune.training.teacher.recipe import LocalSmokeRecipe
+from moebius_finetune.training.teacher.recipe import (
+    ConvInUnfreezeRecipe,
+    LocalSmokeRecipe,
+)
 
 from .conftest import moebius_model, moebius_weights_path
 
@@ -55,6 +59,9 @@ def _synthetic_batch_provider(
     # are independent normal samples; this is enough to feed the
     # 9-channel UNet input without invoking a real VAE.
     masked_latent = rng.standard_normal((1, 4, H // 8, W // 8)).astype(np.float32)
+    # Pre-computed clean target latent x0 (scaled latent space) so the
+    # q_sample objective can noise it without loading the real VAE.
+    clean_latent = rng.standard_normal((1, 4, H // 8, W // 8)).astype(np.float32)
     state = {"i": 0}
 
     def provider() -> Dict[str, Any]:
@@ -67,6 +74,7 @@ def _synthetic_batch_provider(
             "depth_hole": depth.copy(),
             "noise": (noise + 0.001 * i).astype(np.float32),
             "masked_latent": (masked_latent + 0.001 * i).astype(np.float32),
+            "clean_latent": (clean_latent + 0.001 * i).astype(np.float32),
         }
         return out
 
@@ -141,6 +149,101 @@ def test_stage1_only_trains_depth_adapter(moebius_model, tmp_path):
     # The depth adapter parameters are trainable.
     for name, p in wrapped.depth_adapter.named_parameters():
         assert p.requires_grad, f"depth param {name} should be trainable"
+
+
+# ---------------------------------------------------------------------------
+# Stage 2 (TDD2 D2): only conv_in unfreezes
+# ---------------------------------------------------------------------------
+
+
+@pytestmark_gpu
+def test_stage2_unfreezes_conv_in_only(moebius_model, tmp_path):
+    model = moebius_model
+    adapter = DepthConditionAdapter()
+    wrapped = DepthConditionedRemoval(model, adapter)
+    cfg = ConvInUnfreezeRecipe(steps=2, branch_lr=1e-4, conv_in_lr=1e-5)
+    provider = _synthetic_batch_provider(H=512, W=512, seed=4)
+
+    artifacts = finetune_depth_branch(
+        wrapped,
+        cfg,
+        batch_provider=provider,
+        output_dir=tmp_path / "run",
+        weight_metadata=None,
+        data_version="smoke_v0",
+    )
+    conv_in = wrapped.model.diff_model.conv_in
+    conv_in_ids = {id(p) for p in conv_in.parameters()}
+    for name, p in conv_in.named_parameters():
+        assert p.requires_grad, f"conv_in param {name} must be trainable in S2"
+    for name, p in wrapped.model.named_parameters():
+        if id(p) not in conv_in_ids:
+            assert not p.requires_grad, (
+                f"non-conv_in backbone param {name} must stay frozen in S2"
+            )
+    for name, p in wrapped.depth_adapter.named_parameters():
+        assert p.requires_grad, f"depth param {name} must be trainable"
+
+    # The final checkpoint carries adapter + conv_in only.
+    payload = torch.load(
+        str(artifacts.checkpoint_paths[-1]), map_location="cpu", weights_only=False
+    )
+    assert payload["trainable_parts"] == ["depth_adapter", "conv_in"]
+    assert payload["is_depth_adapter_only"] is False
+    keys = set(payload["model_state"].keys())
+    assert any(k.startswith("model.diff_model.conv_in.") for k in keys)
+    assert any(k.startswith("depth_adapter.") for k in keys)
+    assert not any(k.startswith("model.diff_model.up_blocks") for k in keys)
+
+
+@pytestmark_gpu
+def test_stage1_checkpoint_is_adapter_only(moebius_model, tmp_path):
+    model = moebius_model
+    adapter = DepthConditionAdapter()
+    wrapped = DepthConditionedRemoval(model, adapter)
+    cfg = LocalSmokeRecipe(steps=1, lr=1e-4)
+    provider = _synthetic_batch_provider(H=512, W=512, seed=5)
+
+    artifacts = finetune_depth_branch(
+        wrapped,
+        cfg,
+        batch_provider=provider,
+        output_dir=tmp_path / "run",
+        weight_metadata=None,
+        data_version="smoke_v0",
+    )
+    payload = torch.load(
+        str(artifacts.checkpoint_paths[0]), map_location="cpu", weights_only=False
+    )
+    assert payload["is_depth_adapter_only"] is True
+    assert payload["trainable_parts"] == ["depth_adapter"]
+    keys = set(payload["model_state"].keys())
+    assert keys and all(k.startswith("depth_adapter.") for k in keys)
+
+
+# ---------------------------------------------------------------------------
+# q_sample objective (TDD2 §5 correction)
+# ---------------------------------------------------------------------------
+
+
+def test_q_sample_endpoints():
+    """t≈0 → noisy≈x0; t≈999 → noisy≈eps."""
+    from moebius_finetune.training.teacher.cache import (
+        _build_ddim_scheduler,
+        default_scheduler_config,
+    )
+
+    ddim = _build_ddim_scheduler(default_scheduler_config())
+    ab = ddim.alphas_cumprod.to(dtype=torch.float32)
+    x0 = torch.ones(1, 4, 8, 8)
+    eps = torch.zeros(1, 4, 8, 8)
+    t0 = torch.tensor([0], dtype=torch.int64)
+    t999 = torch.tensor([999], dtype=torch.int64)
+    noisy0 = _q_sample(x0, eps, ab, t0)
+    noisy999 = _q_sample(x0, eps, ab, t999)
+    assert torch.allclose(noisy0, x0, atol=1e-3)
+    # ᾱ_999 ≈ 4.66e-3 → √ᾱ·x0 ≈ 0.0683 exactly.
+    assert torch.allclose(noisy999, torch.full_like(x0, float(ab[999].sqrt())), atol=1e-6)
 
 
 # ---------------------------------------------------------------------------

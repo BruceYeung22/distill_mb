@@ -30,12 +30,13 @@ class RecipeConfigError(ValueError):
 
 @dataclass(frozen=True)
 class TeacherTrainingStage:
-    """A single training stage (depth-only or open-backbone)."""
+    """A single training stage (depth-only, conv-in-unfreeze, or open-backbone)."""
 
     name: str
     max_steps: int
     backbone_lr: float
     depth_branch_lr: float
+    conv_in_lr: float = 0.0
     optimizer: str = "adamw"
     weight_decay: float = 0.01
     max_grad_norm: float = 1.0
@@ -50,6 +51,7 @@ class TeacherTrainingStage:
             "max_steps": self.max_steps,
             "backbone_lr": self.backbone_lr,
             "depth_branch_lr": self.depth_branch_lr,
+            "conv_in_lr": self.conv_in_lr,
             "optimizer": self.optimizer,
             "weight_decay": self.weight_decay,
             "max_grad_norm": self.max_grad_norm,
@@ -119,7 +121,7 @@ class DepthBranchOnlyRecipe(BaseRecipe):
 
 @dataclass(frozen=True)
 class JointUnfreezeRecipe(BaseRecipe):
-    """Stage 2: open the backbone, two learning rates (TDD §5.3)."""
+    """Full-open stage: the whole backbone (incl. conv_in) trains (TDD §5.3)."""
 
     steps: int = 18000
     branch_lr: float = 1e-4
@@ -131,6 +133,34 @@ class JointUnfreezeRecipe(BaseRecipe):
             max_steps=int(self.steps),
             backbone_lr=float(self.backbone_lr),
             depth_branch_lr=float(self.branch_lr),
+            conv_in_lr=float(self.backbone_lr),
+            optimizer="adamw",
+            weight_decay=0.01,
+            max_grad_norm=1.0,
+            grad_accum_steps=int(self.grad_accum_steps),
+            amp=bool(self.amp),
+            amp_dtype=str(self.amp_dtype),
+            gradient_checkpointing=bool(self.gradient_checkpointing),
+        )
+
+
+@dataclass(frozen=True)
+class ConvInUnfreezeRecipe(BaseRecipe):
+    """Stage 2 (TDD2 §0/D2): only ``conv_in`` unfreezes; the rest of the
+    backbone stays frozen for the entire run. The depth adapter keeps
+    training alongside."""
+
+    steps: int = 18000
+    branch_lr: float = 1e-4
+    conv_in_lr: float = 1e-5
+
+    def stage(self) -> TeacherTrainingStage:
+        return TeacherTrainingStage(
+            name="unfreeze_conv_in",
+            max_steps=int(self.steps),
+            backbone_lr=0.0,
+            depth_branch_lr=float(self.branch_lr),
+            conv_in_lr=float(self.conv_in_lr),
             optimizer="adamw",
             weight_decay=0.01,
             max_grad_norm=1.0,
@@ -187,7 +217,8 @@ def recipe_from_yaml_dict(data: Mapping[str, Any]) -> BaseRecipe:
     selecting the recipe type; for the two-stage recipe, an
     additional ``stage`` field is required.
 
-    Supported kinds: ``depth_only``, ``open_backbone``, ``local_smoke``.
+    Supported kinds: ``depth_only``, ``open_backbone``,
+    ``unfreeze_conv_in``, ``local_smoke``.
     """
     if not isinstance(data, Mapping):
         raise RecipeConfigError(
@@ -221,6 +252,13 @@ def recipe_from_yaml_dict(data: Mapping[str, Any]) -> BaseRecipe:
             steps=int(data.get("steps", 18000)),
             branch_lr=float(data.get("branch_lr", 1e-4)),
             backbone_lr=float(data.get("backbone_lr", 1e-5)),
+        )
+    if kind_str in ("unfreeze_conv_in", "conv_in", "conv_in_only", "stage2_conv_in"):
+        return ConvInUnfreezeRecipe(
+            **common_kwargs,
+            steps=int(data.get("steps", 18000)),
+            branch_lr=float(data.get("branch_lr", 1e-4)),
+            conv_in_lr=float(data.get("conv_in_lr", 1e-5)),
         )
     if kind_str in ("local_smoke", "smoke"):
         amp = bool(data.get("amp", False))
