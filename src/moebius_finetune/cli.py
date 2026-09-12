@@ -67,6 +67,11 @@ def train_teacher(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--device", default="cuda")
     parser.add_argument("--no-amp", action="store_true")
     parser.add_argument("--zipdepth-checkpoint", default=None)
+    parser.add_argument(
+        "--init-adapter-from",
+        default=None,
+        help="warm-start the depth adapter from a stage-1 checkpoint",
+    )
     args = parser.parse_args(argv)
 
     import torch
@@ -103,6 +108,21 @@ def train_teacher(argv: Optional[Sequence[str]] = None) -> int:
 
     model = load_removal_model(args.weights, strict=True)
     wrapped = DepthConditionedRemoval(model, DepthConditionAdapter())
+    if args.init_adapter_from:
+        import torch
+
+        payload = torch.load(
+            args.init_adapter_from, map_location="cpu", weights_only=False
+        )
+        sd = payload["model_state"]
+        missing, unexpected = wrapped.load_state_dict(sd, strict=False)
+        if unexpected:
+            raise SystemExit(f"unexpected keys in {args.init_adapter_from}")
+        adapter_keys = [k for k in sd if k.startswith("depth_adapter.")]
+        print(
+            f"[init] warm-started adapter from {args.init_adapter_from} "
+            f"({len(adapter_keys)} tensors, stage={payload.get('stage', {}).get('name')})"
+        )
     vae = load_vae(args.vae_dir)
     cases = load_manifest(args.manifest)
     predictor = ZipDepthOnline(checkpoint=args.zipdepth_checkpoint, device=args.device)

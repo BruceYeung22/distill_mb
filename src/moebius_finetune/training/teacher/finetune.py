@@ -416,6 +416,11 @@ def finetune_depth_branch(
 
     # Move model to device. Keep BN frozen (TDD §5.1).
     model.to(device)
+    if vae is not None:
+        # The VAE must live on the same device: autocast casts the CUDA
+        # input to bf16 while CPU conv weights stay fp32 → conv dtype
+        # mismatch (found in the first real-data sanity run).
+        vae.to(device)
     _bn_eval(model)
     # Always keep the depth adapter in train mode so its parameters
     # receive gradient updates even with BN frozen.
