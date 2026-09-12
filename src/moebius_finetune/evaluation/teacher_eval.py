@@ -55,10 +55,13 @@ def pick_cases(
 def aggregate_rows(rows: List[Dict[str, float]]) -> Dict[str, float]:
     """Mean metrics over case rows + the composite score S."""
     if not rows:
-        return {"n": 0, "hole_l1": 0.0, "hole_lpips": 0.0, "global_l1": 0.0, "S": 0.0}
+        return {
+            "n": 0, "hole_l1": 0.0, "hole_lpips": 0.0, "global_l1": 0.0,
+            "S": 0.0, "known_max_error": 0.0, "hole_ratio": 0.0,
+        }
     mean = {
         k: float(np.mean([r[k] for r in rows]))
-        for k in ("hole_l1", "hole_lpips", "global_l1", "hole_ratio")
+        for k in ("hole_l1", "hole_lpips", "global_l1", "hole_ratio", "known_max_error")
     }
     mean["n"] = len(rows)
     mean["S"] = mean["hole_lpips"] + 3.0 * mean["hole_l1"] + mean["global_l1"]
@@ -80,10 +83,27 @@ def _build_model_for_run(
     from ..teachers.loader import load_removal_model
 
     base = load_removal_model(initial_weights, strict=True)
+    ckpt = run["checkpoint"]
     if not run["use_depth"]:
+        # The nodepth ablation still reflects checkpoint-trained weights:
+        # apply the conv_in subset to the bare RemovalModel (depth-adapter
+        # keys have no counterpart and are irrelevant with the branch off).
+        if ckpt != "initial":
+            payload = torch.load(ckpt, map_location="cpu", weights_only=False)
+            mapped = {
+                k.removeprefix("model."): v
+                for k, v in payload["model_state"].items()
+                if k.startswith("model.diff_model.conv_in.")
+            }
+            if mapped:
+                _, unexpected = base.load_state_dict(mapped, strict=False)
+                if unexpected:
+                    raise ValueError(
+                        f"checkpoint {ckpt} unexpected baseline keys: "
+                        f"{sorted(unexpected)[:5]}"
+                    )
         return OriginalRemovalBaseline(base).eval().to(device)
     wrapped = DepthConditionedRemoval(base, DepthConditionAdapter())
-    ckpt = run["checkpoint"]
     if ckpt != "initial":
         payload = torch.load(ckpt, map_location="cpu", weights_only=False)
         sd = payload["model_state"]
