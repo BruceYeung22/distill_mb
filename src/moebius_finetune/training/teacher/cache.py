@@ -421,6 +421,12 @@ def _ddim_loop(
     H_lat, W_lat = initial_noise.shape[-2], initial_noise.shape[-1]
     H, W = H_lat * 8, W_lat * 8
 
+    # The scheduler's cumprod tables live on CPU by default while the
+    # model (and timesteps from _compute_timesteps) may be on CUDA —
+    # align them or alphas_cumprod[timestep] raises a device error.
+    ddim.alphas_cumprod = ddim.alphas_cumprod.to(device)
+    ddim.final_alpha_cumprod = ddim.final_alpha_cumprod.to(device)
+
     if masked_latent is None:
         if vae is None:
             raise CacheConfigError("masked_latent is required when no VAE is provided")
