@@ -50,7 +50,15 @@ class OriginalRemovalBaseline(nn.Module):
         noisy_latents: torch.Tensor,
         timesteps: torch.Tensor,
         input_ids: Optional[torch.Tensor] = None,
+        *,
+        depth_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Run the unmodified 9-channel teacher.
+
+        ``depth_features`` is accepted (and ignored) so the baseline is
+        a drop-in for :class:`DepthConditionedRemoval` in callers that
+        pass the kwarg unconditionally (e.g. the shared DDIM loop).
+        """
         B = noisy_latents.shape[0]
         if input_ids is None:
             input_ids = self._make_input_ids(B, noisy_latents.device)
