@@ -265,7 +265,7 @@ def run_evaluation(
             lines.append(
                 f"| {run['label']} | {summary['n']} | {summary['hole_lpips']:.4f} | "
                 f"{summary['hole_l1']:.4f} | {summary['global_l1']:.4f} | "
-                f"{summary['S']:.4f} | - |"
+                f"{summary['S']:.4f} | {summary['known_max_error']:.6f} |"
             )
             del model
             if torch.cuda.is_available():
