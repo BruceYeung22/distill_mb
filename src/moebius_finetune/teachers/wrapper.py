@@ -197,7 +197,7 @@ class DepthConditionedRemoval(nn.Module):
             conditional half (IDs 0..9) of the model's embedding table.
         depth_features
             ``[B, 2, H/8, W/8]`` low-resolution depth features
-            (coverage + depth-mean from contracts §4.3). When ``None``,
+            (depth-mean + coverage from contracts §4.3). When ``None``,
             the depth branch is bypassed for this call.
         """
         B = noisy_latents.shape[0]
@@ -331,11 +331,12 @@ def _default_depth_features(
 ) -> torch.Tensor:
     """Compute a default 2-channel H/8 depth feature from contracts §4.3.
 
-    This is the area-downsampled coverage + area-downsampled depth-mean
-    used in training. We expose it here so callers can fall back to a
-    deterministic representation when the depth adapter input is not
-    pre-computed (e.g. for tiny smoke tests that do not have a real
-    ZipDepth cache available).
+    This is the area-downsampled **depth-mean followed by coverage**,
+    i.e. the returned channel order is ``[depth_mean(1), coverage(1)]``.
+    We expose it here so callers can fall back to a deterministic
+    representation when the depth adapter input is not pre-computed
+    (e.g. for tiny smoke tests that do not have a real ZipDepth cache
+    available).
     """
     K = 1.0 - hole_mask
     coverage = nn.functional.avg_pool2d(K, kernel_size=8)

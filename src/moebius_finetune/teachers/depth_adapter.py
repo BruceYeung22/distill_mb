@@ -1,24 +1,27 @@
 """Depth-branch adapter for the Moebius teacher.
 
-TDD §5.1 specifies the depth branch:
+TDD2 §1 (``tdd/moebius-grt-depth-finetune-2026-09-12.md``, workspace
+root — not tracked by git) specifies the depth branch as an inverted
+pointwise / depthwise / pointwise block at H/8:
 
-    H/8 input 2 channels → Conv2d(2, 16, 3, padding=1) → ReLU →
-    Conv2d(16, target_dim, 1) → residual add after the original
-    ``conv_in``.
+    input ``channels`` (2) → Conv2d(2, 64, 1) → ReLU →
+    Conv2d(64, 64, 3, padding=1, groups=64) → BatchNorm2d(64) → ReLU →
+    Conv2d(64, target_dim, 1)   # zero-initialized
+    → residual add after the original ``conv_in`` output.
 
 The final 1×1 projection is **zero-initialized** (weight and bias) so
 that the depth-conditioned teacher is bit-equal to the original 9-channel
 teacher at step 0. This is verified in :mod:`tests.teachers` with
 ``atol=1e-7`` in FP32.
 
-The adapter does **not** introduce BN; it only stores its own
-``state_dict`` so it can be saved/loaded independently of the main
-Moebius backbone.
+BN conventions (batch=1 fine-tuning, TDD2 §5): the adapter module runs
+in ``train()`` mode during fine-tuning so its BN running statistics
+accumulate over steps. The Moebius backbone — including the BN inside
+``conv_in`` — stays in ``eval()`` so the pretrained calibration is
+never disturbed (see ``training.teacher.finetune._bn_eval``).
 """
 
 from __future__ import annotations
-
-from typing import Iterable, Optional
 
 import torch
 from torch import nn
@@ -39,24 +42,26 @@ class DepthAdapterConfigError(ValueError):
 
 
 class DepthConditionAdapter(nn.Module):
-    """Zero-initialized 2→hidden→target_dim adapter for depth features.
+    """Zero-initialized pw → dw+BN → pw adapter for depth features.
 
     Parameters
     ----------
     channels
-        Number of input channels (depth features). The TDD spec uses
-        ``2`` (coverage + depth-mean, see §4.3).
+        Number of input channels (depth features). TDD2 uses ``2``
+        (depth-mean + coverage, see §4.3 of the old TDD).
     hidden
-        Hidden width for the 3×3 conv. The spec uses ``16``.
+        Hidden width. The pointwise expansion, the depthwise groups and
+        the BN width all use this value. TDD2 §1 uses ``64``.
     target_dim
-        Output channel count. The spec uses ``320`` to match
-        ``block_out_channels[0]`` of the Moebius config (TDD §5.1).
+        Output channel count. TDD2 uses ``320`` to match
+        ``block_out_channels[0]`` / the ``conv_in`` output of the
+        Moebius config.
     """
 
     def __init__(
         self,
         channels: int = 2,
-        hidden: int = 16,
+        hidden: int = 64,
         target_dim: int = 320,
     ) -> None:
         super().__init__()
@@ -70,15 +75,26 @@ class DepthConditionAdapter(nn.Module):
         self.hidden = int(hidden)
         self.target_dim = int(target_dim)
 
-        self.spatial_conv = nn.Conv2d(
-            self.channels, self.hidden, kernel_size=3, padding=1
+        # pw 1×1 expansion.
+        self.pw_in = nn.Conv2d(self.channels, self.hidden, kernel_size=1, bias=True)
+        self.act_in = nn.ReLU(inplace=False)
+        # dw 3×3 (groups = hidden) + BN + ReLU.
+        self.dw_conv = nn.Conv2d(
+            self.hidden,
+            self.hidden,
+            kernel_size=3,
+            padding=1,
+            groups=self.hidden,
+            bias=False,
         )
-        self.act = nn.ReLU(inplace=False)
-        self.channel_proj = nn.Conv2d(self.hidden, self.target_dim, kernel_size=1)
+        self.bn = nn.BatchNorm2d(self.hidden)
+        self.act_dw = nn.ReLU(inplace=False)
+        # pw 1×1 projection — zero-initialized (TDD2 §1).
+        self.channel_proj = nn.Conv2d(self.hidden, self.target_dim, kernel_size=1, bias=True)
 
         self._zero_init_final_layer()
         # Cache the enabled flag so the wrapper can disable the branch
-        # via context manager (TDD §5.1 ablation "no depth micro-tuning").
+        # via context manager (ablation "no depth micro-tuning").
         self.enabled: bool = True
 
     # ------------------------------------------------------------------
@@ -98,11 +114,14 @@ class DepthConditionAdapter(nn.Module):
 
     def reset_parameters(self) -> None:  # pragma: no cover - convenience
         """Re-initialize the adapter from scratch (PyTorch default + zero final)."""
-        nn.init.kaiming_uniform_(self.spatial_conv.weight, a=5 ** 0.5)
-        if self.spatial_conv.bias is not None:
-            fan_in = self.spatial_conv.in_channels * self.spatial_conv.kernel_size[0] * self.spatial_conv.kernel_size[1]
-            bound = 1.0 / (fan_in ** 0.5) if fan_in > 0 else 0.0
-            nn.init.uniform_(self.spatial_conv.bias, -bound, bound)
+        nn.init.kaiming_uniform_(self.pw_in.weight, a=5 ** 0.5)
+        if self.pw_in.bias is not None:
+            nn.init.uniform_(self.pw_in.bias, -1.0 / self.pw_in.in_channels, 1.0 / self.pw_in.in_channels)
+        nn.init.kaiming_normal_(self.dw_conv.weight, mode="fan_out", nonlinearity="relu")
+        if self.bn.weight is not None:
+            nn.init.ones_(self.bn.weight)
+        if self.bn.bias is not None:
+            nn.init.zeros_(self.bn.bias)
         self._zero_init_final_layer()
 
     # ------------------------------------------------------------------
@@ -140,10 +159,12 @@ class DepthConditionAdapter(nn.Module):
                 dtype=low_res_depth_features.dtype,
                 device=low_res_depth_features.device,
             )
-        x = self.spatial_conv(low_res_depth_features)
-        x = self.act(x)
-        x = self.channel_proj(x)
-        return x
+        x = self.pw_in(low_res_depth_features)
+        x = self.act_in(x)
+        x = self.dw_conv(x)
+        x = self.bn(x)
+        x = self.act_dw(x)
+        return self.channel_proj(x)
 
     # ------------------------------------------------------------------
     # State dict helpers
