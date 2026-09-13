@@ -149,6 +149,7 @@ def distillation_loss(
     pred_latent: Optional[torch.Tensor],
     mask: torch.Tensor,
     *,
+    gt_rgb: Optional[torch.Tensor] = None,
     boundary_band_px: int = 3,
     boundary_weight: float = 0.1,
     latent_weight: float = 1.0,
@@ -160,10 +161,13 @@ def distillation_loss(
     is responsible for casting).
     """
     l_rgb_teacher = hole_l1(pred_rgb, target_rgb, mask)
-    # The "GT" target is passed in as the same target_rgb; this lets
-    # the loss match the TDD notation without introducing a second
-    # tensor. The two terms are summed as per TDD §7.2.
-    l_rgb_gt = hole_l1(pred_rgb, target_rgb, mask)
+    # Ground truth is optional because older caches contain only the
+    # teacher target. Never silently duplicate the teacher term.
+    l_rgb_gt = (
+        hole_l1(pred_rgb, gt_rgb, mask)
+        if gt_rgb is not None
+        else torch.zeros((), device=pred_rgb.device, dtype=pred_rgb.dtype)
+    )
     l_boundary = boundary_gradient_l1(
         pred_rgb, target_rgb, mask, band_px=boundary_band_px
     )

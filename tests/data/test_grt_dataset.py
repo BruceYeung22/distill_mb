@@ -118,6 +118,44 @@ def test_build_case_hole_zeroing_and_sign(tiny_coco):
         assert built["target"].shape == (3, 512, 512)
 
 
+@pytest.mark.parametrize(
+    "rgb_pixel",
+    [
+        (16, 64, 192),
+        (0, 128, 255),
+        (128, 128, 128),
+    ],
+)
+def test_build_case_passes_full_range_bgr_uint8_to_predictor(tmp_path, rgb_pixel):
+    image_dir = tmp_path / "images"
+    image_dir.mkdir()
+    # PNG keeps the source values exact, making the predictor boundary
+    # observable without JPEG compression noise.
+    rgb_pixel = np.array(rgb_pixel, dtype=np.uint8)
+    Image.fromarray(np.broadcast_to(rgb_pixel, (8, 8, 3)).copy()).save(
+        image_dir / "probe.png"
+    )
+    seen = {}
+
+    def recording_predictor(bgr):
+        seen["array"] = bgr.copy()
+        return np.ones((16, 16), dtype=np.float32)
+
+    build_case(
+        CaseSpec("probe", 16, "R2L", "train"),
+        image_dir=image_dir,
+        predictor=recording_predictor,
+        size=16,
+    )
+
+    received = seen["array"]
+    assert received.dtype == np.uint8
+    assert received.shape == (16, 16, 3)
+    np.testing.assert_array_equal(received[0, 0], rgb_pixel[::-1])
+    assert int(received.min()) == int(rgb_pixel.min())
+    assert int(received.max()) == int(rgb_pixel.max())
+
+
 def test_build_case_small_disparity_fewer_holes(tiny_coco):
     pred = _ramp_predictor()
     small = build_case(
@@ -183,6 +221,25 @@ def test_provider_requires_split_cases(tiny_coco):
             predictor=_ramp_predictor(),
             split="holdout_images",
         )
+
+
+def test_provider_all_rejected_cases_terminates_with_diagnostic(tiny_coco):
+    cases = [CaseSpec("00000000", 16, "L2R", "train"),
+             CaseSpec("00000001", 16, "R2L", "train")]
+    calls = 0
+
+    def invalid_predictor(bgr):
+        nonlocal calls
+        calls += 1
+        # A regression to infinite retries must fail promptly, not hang CI.
+        assert calls <= len(cases), "provider repeated an all-invalid epoch"
+        return np.zeros((512, 512), np.float32)
+
+    with pytest.raises(ValueError, match="no valid cases.*accepted hole_ratio"):
+        GrtTrainProvider(cases, image_dir=tiny_coco,
+                         predictor=invalid_predictor,
+                         seed=0)()
+    assert calls == len(cases)
 
 
 def tmp_manifest(tiny_coco, m):

@@ -111,9 +111,12 @@ def epsilon_mse(
     valid = flat_mask > 0
     if not bool(valid.any()):
         return torch.zeros((), dtype=torch.float32, device=pred_eps.device)
+    # Keep the complete B dimension.  Indexing to valid cases before
+    # ``where`` makes mixed empty/non-empty batches shape-incompatible and
+    # would also drop empty cases from the documented batch mean.
     per_case = torch.where(
         valid,
-        flat_diff[valid] / flat_mask[valid].clamp_min(1e-12),
+        flat_diff / flat_mask.clamp_min(1e-12),
         torch.zeros_like(flat_diff),
     )
     return per_case.mean()

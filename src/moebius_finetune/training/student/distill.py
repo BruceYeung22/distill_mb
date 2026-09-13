@@ -230,7 +230,7 @@ class DistillTrainer:
         rgb_target = (
             torch.from_numpy(np.ascontiguousarray(batch.target_rgb)).to(device=device)[None]
             if batch.target_rgb is not None
-            else rgb
+            else None
         )
         teacher_rgb = torch.from_numpy(
             np.ascontiguousarray(batch.teacher_rgb)
@@ -255,6 +255,7 @@ class DistillTrainer:
         info = distillation_loss(
             pred_rgb=composed,
             target_rgb=teacher_rgb,
+            gt_rgb=rgb_target,
             target_latent=None,
             pred_latent=None,
             mask=mask,
@@ -311,6 +312,10 @@ class DistillTrainer:
         info = distillation_loss(
             pred_rgb=composed,
             target_rgb=teacher_rgb,
+            gt_rgb=(
+                torch.from_numpy(np.ascontiguousarray(batch.target_rgb)).to(device=device)[None]
+                if batch.target_rgb is not None else None
+            ),
             target_latent=target_latent,
             pred_latent=pred_latent,
             mask=mask,

@@ -25,6 +25,15 @@ from moebius_finetune.data.manifest_io import (
 )
 
 
+def test_data_package_preserves_legacy_manifest_exports_and_names_online_api():
+    import moebius_finetune.data as data
+    from moebius_finetune.data import grt_dataset
+    assert data.load_manifest is load_manifest
+    assert data.save_manifest is save_manifest
+    assert data.load_online_manifest is grt_dataset.load_manifest
+    assert data.save_online_manifest is grt_dataset.save_manifest
+
+
 # ---------------------------------------------------------------------------
 # to_relative
 # ---------------------------------------------------------------------------

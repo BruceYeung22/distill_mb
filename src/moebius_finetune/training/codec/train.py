@@ -117,7 +117,27 @@ class CodecTrainer:
         self.optimizer.zero_grad(set_to_none=True)
         rgb = batch_rgb.to(self.device, non_blocking=True)
         with torch.no_grad():
-            z_target = self.vae_or_synthetic.posterior(rgb)
+            # SyntheticVAE exposes posterior() and already returns the
+            # target-space latent. Real diffusers VAEs use encode() and
+            # expect RGB in [-1, 1], then require their scaling_factor.
+            if hasattr(self.vae_or_synthetic, "posterior"):
+                z_target = self.vae_or_synthetic.posterior(rgb)
+            else:
+                encoded = self.vae_or_synthetic.encode(2.0 * rgb - 1.0)
+                latent_dist = getattr(encoded, "latent_dist", None)
+                if latent_dist is None or not hasattr(latent_dist, "mode"):
+                    raise TypeError(
+                        "real VAE encode() must return an object with latent_dist.mode()"
+                    )
+                z_target = latent_dist.mode()
+                scale = float(
+                    getattr(
+                        getattr(self.vae_or_synthetic, "config", None),
+                        "scaling_factor",
+                        0.13025,
+                    )
+                )
+                z_target = z_target * scale
         z_pred, rgb_hat = self.codec(rgb)
         # Both the latent and RGB losses are in FP32 even if the codec
         # is in BF16, by casting to FP32 before the loss.
@@ -199,8 +219,8 @@ def train_codec(
     codec
         The lightweight codec to train.
     vae_or_synthetic
-        Either the real frozen Moebius VAE (with ``posterior`` /
-        ``decode`` methods) or a :class:`SyntheticVAE` for smoke
+        Either the real frozen Moebius VAE (with ``encode`` returning
+        ``latent_dist.mode()``) or a :class:`SyntheticVAE` for smoke
         tests. The real VAE is never modified by this loop.
     steps
         Number of optimizer steps to run.

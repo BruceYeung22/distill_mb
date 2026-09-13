@@ -27,7 +27,7 @@ from __future__ import annotations
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Union
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 
@@ -54,6 +54,7 @@ __all__ = [
 
 
 Predictor = Callable[..., np.ndarray]
+CaseLoader = Callable[[SampleManifest], Tuple[ConditionBatch, np.ndarray]]
 
 
 @dataclass
@@ -88,6 +89,7 @@ class FixedEvaluator:
     H: int = 64
     B: int = 1
     hole_spec: str = "thin"
+    case_loader: Optional[CaseLoader] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -102,6 +104,11 @@ class FixedEvaluator:
         expressed as the per-seed hole PSNR.
         """
         if self.manifest is not None and len(self.manifest) > 0:
+            if self.case_loader is None:
+                raise ConditionContractError(
+                    "manifest evaluation requires case_loader; refusing to "
+                    "silently substitute synthetic data"
+                )
             return self._run_manifest()
         return self._run_synthetic()
 
@@ -182,19 +189,25 @@ class FixedEvaluator:
         }
 
     def _load_case(self, case: SampleManifest) -> tuple[ConditionBatch, np.ndarray]:
-        """Stub: load an on-disk case into a (batch, target) pair.
-
-        This implementation returns a synthetic batch + target when
-        the manifest's files are missing. Real data loading is
-        performed by Agent B/C's training dataloader; the
-        evaluator is data-source-agnostic and only needs the
-        batch/target contract.
-        """
-        from ..data.synthetic import make_synthetic_batch
-        batch = make_synthetic_batch(
-            H=self.H, B=self.B, hole_spec=self.hole_spec, seed=self.seed
-        )
-        target = self._build_synthetic_target(batch)
+        """Load one real case through the explicitly supplied loader."""
+        if self.case_loader is None:  # defensive for direct private calls
+            raise ConditionContractError(
+                "case_loader is required when evaluating a manifest"
+            )
+        result = self.case_loader(case)
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ConditionContractError(
+                "case_loader must return (ConditionBatch, target)"
+            )
+        batch, target = result
+        if not isinstance(batch, ConditionBatch):
+            raise ConditionContractError("case_loader returned an invalid ConditionBatch")
+        target = np.asarray(target, dtype=np.float32)
+        if target.shape != batch.rgb_hole.shape:
+            raise ConditionContractError(
+                f"case_loader target shape {target.shape} does not match "
+                f"condition {batch.rgb_hole.shape}"
+            )
         return batch, target
 
     # ------------------------------------------------------------------
@@ -296,6 +309,7 @@ def evaluate_manifest(
     H: int = 64,
     B: int = 1,
     hole_spec: str = "thin",
+    case_loader: Optional[CaseLoader] = None,
 ) -> Dict[str, Any]:
     """Convenience wrapper around :class:`FixedEvaluator`."""
     ev = FixedEvaluator(
@@ -306,5 +320,6 @@ def evaluate_manifest(
         H=H,
         B=B,
         hole_spec=hole_spec,
+        case_loader=case_loader,
     )
     return ev.run()

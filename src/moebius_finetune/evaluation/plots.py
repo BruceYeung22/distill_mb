@@ -100,6 +100,18 @@ def _error_to_rgb(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
 
 def _ensure_image(item: Any, kind: str) -> np.ndarray:
     """Return a ``(H, W, 3)`` uint8 image for the given item + kind."""
+    if kind == "error":
+        if isinstance(item, np.ndarray):
+            return _to_hwc_uint8(item)
+        # Error tiles are represented by a pair of arrays rather than one
+        # image, so dispatch this shape before the ordinary array check.
+        if not isinstance(item, dict) or "pred" not in item or "target" not in item:
+            raise ValueError(
+                f"'error' must be a dict with 'pred' and 'target' keys, got {type(item).__name__}"
+            )
+        if not isinstance(item["pred"], np.ndarray) or not isinstance(item["target"], np.ndarray):
+            raise ValueError("'error' pred and target must be numpy arrays")
+        return _error_to_rgb(item["pred"], item["target"])
     if not isinstance(item, np.ndarray):
         raise ValueError(f"{kind} entry must be a numpy array, got {type(item).__name__}")
     if kind in ("input", "target", "baseline", "teacher", "student"):
@@ -108,13 +120,6 @@ def _ensure_image(item: Any, kind: str) -> np.ndarray:
         return _to_hwc_uint8(item)
     if kind == "depth":
         return _depth_to_rgb(item)
-    if kind == "error":
-        # error needs a target reference; expect {pred, target}
-        if not isinstance(item, dict) or "pred" not in item or "target" not in item:
-            raise ValueError(
-                f"'error' must be a dict with 'pred' and 'target' keys, got {type(item).__name__}"
-            )
-        return _error_to_rgb(item["pred"], item["target"])
     raise ValueError(f"unknown column kind {kind!r}")
 
 

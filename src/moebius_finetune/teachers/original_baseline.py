@@ -50,7 +50,15 @@ class OriginalRemovalBaseline(nn.Module):
         noisy_latents: torch.Tensor,
         timesteps: torch.Tensor,
         input_ids: Optional[torch.Tensor] = None,
+        *,
+        depth_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """Run one step using the common teacher interface.
+
+        ``depth_features`` is intentionally ignored.  Accepting it keeps
+        the original baseline usable by the same DDIM/cache call path as
+        the depth-conditioned wrapper.
+        """
         B = noisy_latents.shape[0]
         if input_ids is None:
             input_ids = self._make_input_ids(B, noisy_latents.device)
@@ -67,6 +75,7 @@ class OriginalRemovalBaseline(nn.Module):
         timesteps: Optional[torch.Tensor] = None,
         input_ids: Optional[torch.Tensor] = None,
         masked_latent: Optional[torch.Tensor] = None,
+        depth_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Same signature as :func:`DepthConditionedRemoval.predict_candidate`."""
         validate_condition(condition)
@@ -98,7 +107,9 @@ class OriginalRemovalBaseline(nn.Module):
             timesteps = torch.zeros((B,), dtype=torch.int64, device=device)
         timesteps = timesteps.to(device)
 
-        return self.forward(latent_input, timesteps, input_ids)
+        return self.forward(
+            latent_input, timesteps, input_ids, depth_features=depth_features
+        )
 
 
 __all__ = ["OriginalRemovalBaseline"]

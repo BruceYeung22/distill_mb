@@ -75,13 +75,10 @@ def _build_model_for_run(
     from ..teachers import (
         DepthConditionAdapter,
         DepthConditionedRemoval,
-        OriginalRemovalBaseline,
     )
     from ..teachers.loader import load_removal_model
 
     base = load_removal_model(initial_weights, strict=True)
-    if not run["use_depth"]:
-        return OriginalRemovalBaseline(base).eval().to(device)
     wrapped = DepthConditionedRemoval(base, DepthConditionAdapter())
     ckpt = run["checkpoint"]
     if ckpt != "initial":
@@ -92,6 +89,11 @@ def _build_model_for_run(
             raise ValueError(
                 f"checkpoint {ckpt} has unexpected keys: {sorted(unexpected)[:5]}"
             )
+    # The nodepth ablation must use the same checkpoint (including stage-2
+    # conv_in), with only the residual branch disabled after loading it.
+    if not run["use_depth"]:
+        wrapped._branch_depth_enabled = False
+        wrapped.depth_adapter.enabled = False
     return wrapped.eval().to(device)
 
 

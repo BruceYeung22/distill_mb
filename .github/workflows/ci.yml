@@ -8,7 +8,7 @@ on:
 
 jobs:
   cpu-contract-tests:
-    name: CPU contract + config tests
+    name: Minimal dependencies — contracts, config and data
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -25,17 +25,41 @@ jobs:
           cache: pip
 
       - name: Install minimal CPU test dependencies
-        # Heavy ML / NPU stacks (torch, diffusers, transformers, onnx,
-        # rknn) are deliberately NOT installed. The contract tests and
-        # config loader only need numpy + pyyaml + pytest.
+        # This job deliberately has no ML stack. Package dependencies
+        # provide numpy, PyYAML and Pillow for the data tests.
         run: |
           python -m pip install --upgrade pip
           python -m pip install "numpy>=1.24" "pyyaml>=6.0" "pytest>=7.0"
 
-      - name: Install package (editable, no deps of its own)
+      - name: Install package
         run: |
           python -m pip install -e .
 
-      - name: Run CPU contract + config tests
+      - name: Run minimal-dependency tests
         run: |
-          python -m pytest tests/ -x --maxfail=1 -ra
+          python -m pytest tests/test_contracts.py tests/test_config.py tests/data -x --maxfail=1 -ra
+
+  ml-cpu-tests:
+    name: ML and export tests on CPU
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CUDA_VISIBLE_DEVICES: ""
+      OMP_NUM_THREADS: "2"
+      MKL_NUM_THREADS: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install CPU ML and export dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -e ".[dev]" diffusers transformers accelerate safetensors matplotlib onnx onnxruntime onnxscript
+      - name: Run complete test collection and CPU-capable tests
+        # Weight-dependent and device-only tests explicitly skip when their
+        # prerequisites are absent; CI does not download private checkpoints.
+        run: |
+          python -m pytest tests/ -ra

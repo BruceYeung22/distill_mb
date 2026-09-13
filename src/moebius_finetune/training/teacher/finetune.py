@@ -143,7 +143,7 @@ The returned dict may contain:
   latent of the masked image. When missing, the trainer encodes the
   masked image with the VAE passed at construction.
 
-The provider is called per step. It should be deterministic with
+The provider is called once per microbatch. It should be deterministic with
 respect to the global RNG state when seeding has been done.
 """
 
@@ -391,6 +391,12 @@ def finetune_depth_branch(
     Returns
     -------
     TeacherFinetuneArtifacts
+
+    Notes
+    -----
+    ``stage.max_steps`` counts optimizer updates. Each update consumes
+    ``stage.grad_accum_steps`` provider calls; logs, checkpoints, and
+    ``global_step`` use the same optimizer-update count.
     """
     if not isinstance(model, DepthConditionedRemoval):
         # For ablation, an OriginalRemovalBaseline can be used; in that
@@ -409,6 +415,11 @@ def finetune_depth_branch(
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     stage = train_cfg.stage()
+    grad_accum_steps = int(stage.grad_accum_steps)
+    if grad_accum_steps <= 0:
+        raise FinetuneConfigError(
+            f"grad_accum_steps must be positive, got {grad_accum_steps}"
+        )
     amp, amp_dtype = _check_amp_dtype(stage.amp, stage.amp_dtype, device)
 
     # Seed before model move so initial state is deterministic.
@@ -505,27 +516,43 @@ def finetune_depth_branch(
     alphas_bar = train_ddim.alphas_cumprod.to(device=device, dtype=torch.float32)
 
     best_loss = float("inf")
-    accum_count = 0
+    optimizer.zero_grad(set_to_none=True)
     for step in range(1, int(stage.max_steps) + 1):
-        batch = batch_provider()
-        result = _train_step(
-            model=model,
-            optimizer=optimizer,
-            batch=batch,
-            vae=vae,
-            device=device,
-            amp=amp,
-            amp_dtype=amp_dtype,
-            max_grad_norm=float(stage.max_grad_norm),
-            known_weight=0.1,
-            alphas_bar=alphas_bar,
-        )
-        accum_count += 1
-        if accum_count >= int(stage.grad_accum_steps):
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-            accum_count = 0
+        window_results: List[TrainResult] = []
+        for _ in range(grad_accum_steps):
+            batch = batch_provider()
+            window_results.append(
+                _train_step(
+                    model=model,
+                    optimizer=optimizer,
+                    batch=batch,
+                    vae=vae,
+                    device=device,
+                    amp=amp,
+                    amp_dtype=amp_dtype,
+                    known_weight=0.1,
+                    alphas_bar=alphas_bar,
+                    loss_scale=1.0 / grad_accum_steps,
+                )
+            )
 
+        # Clip once, after the averaged gradients for the whole window have
+        # been accumulated.  This keeps clipping independent of the number
+        # of microbatches in a window.
+        grad_norm = nn.utils.clip_grad_norm_(
+            [p for g in optimizer.param_groups for p in g["params"]],
+            max_norm=float(stage.max_grad_norm),
+        )
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+        result = TrainResult(
+            loss=float(np.mean([r.loss for r in window_results])),
+            hole_loss=float(np.mean([r.hole_loss for r in window_results])),
+            known_loss=float(np.mean([r.known_loss for r in window_results])),
+            grad_norm=float(grad_norm),
+            learning_rate=window_results[-1].learning_rate,
+        )
         if result.loss < best_loss:
             best_loss = float(result.loss)
 
@@ -737,11 +764,16 @@ def _train_step(
     device: torch.device,
     amp: bool,
     amp_dtype: Optional[torch.dtype],
-    max_grad_norm: float,
     known_weight: float,
     alphas_bar: torch.Tensor,
+    loss_scale: float = 1.0,
 ) -> TrainResult:
-    """One optimizer step (no parameter update happens here)."""
+    """Run one microbatch forward/backward pass.
+
+    The caller owns gradient clearing, clipping, and ``optimizer.step()``.
+    ``loss_scale`` divides the contribution of this microbatch when several
+    microbatches are accumulated into one optimizer update.
+    """
     def _to_tensor(value: Any, name: str) -> torch.Tensor:
         if isinstance(value, torch.Tensor):
             return value.to(device=device, dtype=torch.float32)
@@ -824,7 +856,6 @@ def _train_step(
     latent_input = torch.cat([noisy, latent_mask, masked_latent], dim=1)
     target_eps = eps
 
-    optimizer.zero_grad(set_to_none=True)
     if amp and amp_dtype is not None:
         with torch.autocast(device_type=device.type, dtype=amp_dtype):
             pred_eps = model.forward(
@@ -847,11 +878,9 @@ def _train_step(
             known_weight=known_weight,
         )
 
-    loss.backward()
-    grad_norm = nn.utils.clip_grad_norm_(
-        [p for g in optimizer.param_groups for p in g["params"]],
-        max_norm=max_grad_norm,
-    )
+    if loss_scale <= 0.0:
+        raise FinetuneConfigError(f"loss_scale must be positive, got {loss_scale}")
+    (loss * float(loss_scale)).backward()
     lr = float(optimizer.param_groups[0]["lr"])
     hole_term = float(
         combined_epsilon_loss(pred_eps.float(), target_eps, latent_mask, known_weight=0.0).item()
@@ -861,7 +890,9 @@ def _train_step(
         loss=float(loss.item()),
         hole_loss=hole_term,
         known_loss=known_term,
-        grad_norm=float(grad_norm) if isinstance(grad_norm, torch.Tensor) else float(grad_norm),
+        # The update-level gradient norm is measured and clipped by the
+        # outer loop after all microbatches have contributed.
+        grad_norm=0.0,
         learning_rate=lr,
     )
 

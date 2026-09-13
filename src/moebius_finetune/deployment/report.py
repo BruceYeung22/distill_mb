@@ -67,7 +67,7 @@ def make_report(
     model_name: str = "model",
     input_spec: tuple = (1, 5, 512, 512),
     reread_factor_options: tuple = (1.0, 1.5, 2.0),
-    extra_bytes: int = 32 * 1024 * 1024,
+    extra_bytes: int = 32 * 1_000_000,
     macs_limit_g: float = 8.0,
     traffic_limit_mb: float = 300.0,
 ) -> BudgetReport:
@@ -89,6 +89,8 @@ def make_report(
     full = {
         "total_macs_g": algorithm["total_macs_g"],
         "dram_traffic": dram,
+        "accounting_complete": algorithm.get("accounting_complete", False) and logical.get("accounting_complete", False),
+        "unknown_ops": sorted(set(algorithm.get("unknown_ops", [])) | set(logical.get("unknown_ops", []))),
     }
     compliance = compare_to_budget(
         full,
@@ -128,6 +130,9 @@ def format_markdown(report: BudgetReport) -> str:
         lines.append(f"- Unsupported ops (static table): `{', '.join(algo['unsupported_ops'])}`")
     else:
         lines.append("- Unsupported ops (static table): _none_")
+    if algo.get("unknown_ops"):
+        lines.append(f"- Unknown/unaccounted executed ops: `{', '.join(algo['unknown_ops'])}`")
+    lines.append(f"- Accounting complete: `{algo.get('accounting_complete', True)}`")
     lines.append("")
     lines.append("Per-op breakdown (top 20 by MACs):")
     lines.append("")
@@ -147,6 +152,7 @@ def format_markdown(report: BudgetReport) -> str:
     lines.append("|---|---|---|")
     for key in (
         "weights_bytes",
+        "weight_read_bytes",
         "input_bytes",
         "output_bytes",
         "skip_lifetime_bytes",

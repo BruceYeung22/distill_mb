@@ -250,7 +250,13 @@ def build_case(
     """
     rgb = _load_source_rgb01(image_dir, case.source_id, size)
     disp = np.asarray(
-        predictor(rgb.transpose(1, 2, 0)[..., ::-1].astype(np.uint8)),
+        predictor(
+            np.clip(
+                rgb.transpose(1, 2, 0)[..., ::-1] * np.float32(255.0),
+                0.0,
+                255.0,
+            ).astype(np.uint8)
+        ),
         dtype=np.float32,
     )
     if disp.shape != (size, size):
@@ -319,8 +325,13 @@ class GrtTrainProvider:
         self.drawn_combos: Dict[str, int] = {}
 
     def __call__(self) -> Dict[str, np.ndarray]:
-        while True:
-            spec = self.cases[int(self._rng.integers(len(self.cases)))]
+        # Bound each draw to one shuffled epoch.  This guarantees that a
+        # split containing at least one acceptable case is eventually used,
+        # while an all-rejected split fails promptly with useful diagnostics.
+        order = self._rng.permutation(len(self.cases))
+        rejected: List[tuple[str, float]] = []
+        for idx in order:
+            spec = self.cases[int(idx)]
             built = build_case(
                 spec,
                 image_dir=self.image_dir,
@@ -330,6 +341,14 @@ class GrtTrainProvider:
             if HOLE_RATIO_MIN < built["hole_ratio"] < HOLE_RATIO_MAX:
                 break
             self.skipped += 1
+            rejected.append((spec.case_id, float(built["hole_ratio"])))
+        else:
+            details = ", ".join(f"{cid}={ratio:.6g}" for cid, ratio in rejected)
+            raise ValueError(
+                f"no valid cases for split after one epoch ({len(self.cases)} "
+                f"candidates; accepted hole_ratio in ({HOLE_RATIO_MIN}, "
+                f"{HOLE_RATIO_MAX})); rejected: {details}"
+            )
         combo_key = f"{spec.dmax_px}_{spec.direction}"
         self.drawn_combos[combo_key] = self.drawn_combos.get(combo_key, 0) + 1
         self._salt += 1

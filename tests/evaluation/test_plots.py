@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from moebius_finetune.evaluation.plots import plot_comparison_grid
+from moebius_finetune.evaluation.plots import _ensure_image, plot_comparison_grid
 
 
 def _full_item(h: int = 32, w: int = 32) -> dict:
@@ -71,6 +71,19 @@ def test_plot_comparison_grid_error_dict(tmp_path: Path):
     }
     res = plot_comparison_grid([item], out)
     assert res is not None
+
+
+def test_error_tile_dict_is_rendered_as_error_image():
+    pred = np.zeros((3, 2, 2), dtype=np.float32)
+    target = np.ones_like(pred)
+    img = _ensure_image({"pred": pred, "target": target}, "error")
+    assert img.shape == (2, 2, 3)
+    assert not np.all(img == 128)  # not the renderer's blank fallback tile
+
+
+def test_error_tile_accepts_pre_rendered_array():
+    rendered = np.full((8, 8, 3), [10, 20, 30], dtype=np.uint8)
+    np.testing.assert_array_equal(_ensure_image(rendered, "error"), rendered)
 
 
 def test_plot_comparison_grid_bad_value_returns_none(tmp_path: Path, capsys):

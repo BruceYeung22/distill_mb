@@ -51,12 +51,14 @@ them does not need GPU, teacher weights, or any private data.
 # from the workspace root, via WSL
 wsl.exe -- bash -lc \
   "cd /mnt/d/project/moebius_distill/finetune && \
-   ~/ml-venv/bin/python -m pytest tests/ -x"
+   ~/ml-venv/bin/python -m pytest tests/test_contracts.py tests/test_config.py tests/data -x"
 ```
 
-The CI workflow under `.github/workflows/ci.yml` runs the same command
-on a Python 3.12 runner without torch, diffusers, transformers, onnx
-or rknn-toolkit.
+The CI workflow under `.github/workflows/ci.yml` runs this minimal-dependency
+subset on Python 3.12. A separate CPU job installs the ML and ONNX stacks
+and collects the complete test suite. Tests requiring private weights or
+a GPU skip when those prerequisites are absent; RKNN hardware validation
+remains a separate local step.
 
 ## Path conventions
 

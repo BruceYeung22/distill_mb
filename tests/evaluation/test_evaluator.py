@@ -33,6 +33,12 @@ def _make_batch(H: int = 64, B: int = 1, hole_spec: str = "thin") -> ConditionBa
     return make_synthetic_batch(H=H, B=B, hole_spec=hole_spec, seed=0)
 
 
+def _synthetic_case_loader(case):
+    batch = _make_batch()
+    target = np.clip(batch.rgb_hole + batch.hole_mask * np.float32(0.5), 0.0, 1.0)
+    return batch, target
+
+
 def test_dummy_predictor_returns_correct_shape():
     batch = _make_batch()
     out = run_dummy_predictor(batch, seed=0)
@@ -175,6 +181,7 @@ def test_evaluator_runs_with_manifest():
     manifest = [_make_manifest_sample("a"), _make_manifest_sample("b")]
     ev = FixedEvaluator(
         predictor=run_dummy_predictor, manifest=manifest, H=64, n_seeds=3,
+        case_loader=_synthetic_case_loader,
     )
     out = ev.run()
     assert len(out["per_case"]) == 2
@@ -187,6 +194,7 @@ def test_evaluate_manifest_convenience():
     manifest = [_make_manifest_sample()]
     out = evaluate_manifest(
         manifest, run_dummy_predictor, H=64, n_seeds=2,
+        case_loader=_synthetic_case_loader,
     )
     assert "per_case" in out
     assert len(out["per_case"]) == 1
@@ -209,8 +217,15 @@ def test_evaluator_aggregate_includes_per_split_groups():
             depth_normalization=DepthNormalization(p99=0.3),
         ),
     ]
-    out = evaluate_manifest(manifest, run_dummy_predictor, H=64, n_seeds=2)
+    out = evaluate_manifest(manifest, run_dummy_predictor, H=64, n_seeds=2,
+                            case_loader=_synthetic_case_loader)
     agg = out["aggregate"]
     assert "by_split" in agg
     assert "train" in agg["by_split"]
     assert "holdout_images" in agg["by_split"]
+
+
+def test_manifest_requires_explicit_loader():
+    with pytest.raises(ConditionContractError, match="case_loader"):
+        FixedEvaluator(predictor=run_dummy_predictor,
+                       manifest=[_make_manifest_sample()]).run()

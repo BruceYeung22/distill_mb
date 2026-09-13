@@ -207,8 +207,18 @@ class InvertedResidualBlock(nn.Module):
         fused.expand = self.expand.fuse()
         fused.dw = self.dw.fuse()
         # The project conv has no BN, so just copy its weights.
+        src = self.project
+        fused.project = nn.Conv2d(
+            src.in_channels, src.out_channels, src.kernel_size,
+            stride=src.stride, padding=src.padding, dilation=src.dilation,
+            groups=src.groups, bias=src.bias is not None,
+            padding_mode=src.padding_mode, device=src.weight.device,
+            dtype=src.weight.dtype,
+        )
         with torch.no_grad():
             fused.project.weight.copy_(self.project.weight)
+            if src.bias is not None:
+                fused.project.bias.copy_(src.bias)
         return fused
 
 

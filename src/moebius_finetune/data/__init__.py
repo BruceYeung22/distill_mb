@@ -40,9 +40,9 @@ from .grt_dataset import (
     build_manifest,
     hole_ratio_of,
     list_image_ids,
-    load_manifest,
+    load_manifest as load_online_manifest,
     resolve_zipdepth_dir,
-    save_manifest,
+    save_manifest as save_online_manifest,
 )
 
 
@@ -61,6 +61,8 @@ __all__ = [
     # manifest_io
     "load_manifest",
     "save_manifest",
+    "load_online_manifest",
+    "save_online_manifest",
     "from_hami_320",
     "to_relative",
     "mask_rel_to_data_root",

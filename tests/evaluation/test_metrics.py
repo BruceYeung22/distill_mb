@@ -77,6 +77,22 @@ def test_hole_psnr_full_mask_constant_fill():
     assert out == pytest.approx(6.02, abs=0.05)
 
 
+def test_hole_psnr_normalizes_by_hole_pixels_and_channels():
+    pred = np.full((1, 3, 16, 16), 0.5, dtype=np.float32)
+    target = np.zeros_like(pred)
+    mask = np.zeros((1, 1, 16, 16), dtype=np.float32)
+    mask[:, :, :8, :] = 1
+    assert hole_psnr(pred, target, mask) == pytest.approx(6.02, abs=0.05)
+
+
+def test_hole_psnr_zero_db_is_valid_case():
+    pred = np.ones((2, 3, 2, 2), dtype=np.float32)
+    pred[1] = 0.5
+    target = np.zeros_like(pred)
+    mask = np.ones((2, 1, 2, 2), dtype=np.float32)
+    assert hole_psnr(pred, target, mask) == pytest.approx(10 * np.log10(4) / 2)
+
+
 def test_hole_psnr_empty_mask_returns_zero():
     pred, target = _random_pair(0)
     out = hole_psnr(pred, target, _empty_mask())
@@ -163,6 +179,24 @@ def test_boundary_l1_empty_mask_returns_zero():
     a, b = _random_pair(0)
     out = boundary_l1(a, b, _empty_mask())
     assert out == 0.0
+
+
+def test_boundary_l1_excludes_deep_hole_pixels():
+    target = np.zeros((1, 3, 16, 16), dtype=np.float32)
+    pred = target.copy()
+    mask = np.zeros((1, 1, 16, 16), dtype=np.float32)
+    mask[:, :, 3:13, 3:13] = 1
+    pred[:, :, 8, 8] = 1.0
+    assert boundary_l1(pred, target, mask, band_px=1) == pytest.approx(0.0)
+
+
+def test_boundary_l1_zero_error_case_is_kept_in_batch_mean():
+    target = np.zeros((2, 3, 8, 8), dtype=np.float32)
+    pred = target.copy()
+    mask = np.zeros((2, 1, 8, 8), dtype=np.float32)
+    mask[:, :, :4, :] = 1
+    pred[0, :, 3, :] = 1.0
+    assert boundary_l1(pred, target, mask, band_px=1) == pytest.approx(0.25)
 
 
 def test_boundary_l1_per_case():

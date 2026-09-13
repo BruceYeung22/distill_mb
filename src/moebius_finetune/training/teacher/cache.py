@@ -23,6 +23,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
@@ -233,7 +234,7 @@ The builder MUST NOT include the clean target in the
 """
 
 
-def cache_teacher_outputs(
+def _cache_teacher_outputs_impl(
     model: DepthConditionedRemoval,
     case_list: Sequence[str],
     seed_list: Sequence[int],
@@ -373,6 +374,61 @@ def cache_teacher_outputs(
 
             entries.append(entry)
     return entries
+
+
+@contextmanager
+def _inference_eval(*modules: Optional[nn.Module]):
+    """Temporarily put every submodule in eval mode, then restore exactly.
+
+    Assigning the saved flags directly on teardown is deliberate: calling
+    ``train()`` on a parent would erase mixed states such as a frozen eval
+    backbone with a train-mode adapter.
+    """
+    saved: List[Tuple[nn.Module, bool]] = []
+    seen = set()
+    for module in modules:
+        if module is None:
+            continue
+        for submodule in module.modules():
+            if id(submodule) not in seen:
+                seen.add(id(submodule))
+                saved.append((submodule, bool(submodule.training)))
+    try:
+        for submodule, _ in saved:
+            submodule.training = False
+        yield
+    finally:
+        for submodule, training in saved:
+            submodule.training = training
+
+
+def cache_teacher_outputs(
+    model: DepthConditionedRemoval,
+    case_list: Sequence[str],
+    seed_list: Sequence[int],
+    scheduler_cfg: Mapping[str, Any],
+    *,
+    data_version: str = "synthetic",
+    teacher_checkpoint_sha256: str = "",
+    moebius_commit: str = "",
+    vae: Optional[nn.Module] = None,
+    case_batch_builder: Optional[CaseBatchBuilder] = None,
+    on_case: Optional[Callable[[TeacherCacheEntry], None]] = None,
+) -> List[TeacherCacheEntry]:
+    """Run cache inference without autograd or mutable running statistics."""
+    with _inference_eval(model, vae), torch.inference_mode():
+        return _cache_teacher_outputs_impl(
+            model=model,
+            case_list=case_list,
+            seed_list=seed_list,
+            scheduler_cfg=scheduler_cfg,
+            data_version=data_version,
+            teacher_checkpoint_sha256=teacher_checkpoint_sha256,
+            moebius_commit=moebius_commit,
+            vae=vae,
+            case_batch_builder=case_batch_builder,
+            on_case=on_case,
+        )
 
 
 # ---------------------------------------------------------------------------

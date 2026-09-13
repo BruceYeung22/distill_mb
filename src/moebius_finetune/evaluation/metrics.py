@@ -124,15 +124,19 @@ def hole_psnr(
             out[i] = 0.0
             continue
         diff = (p[i] - t[i]) * mi
-        # Per-element squared error, averaged over masked region
-        mse = float(np.mean(diff * diff))
+        # Count only masked pixels and all colour channels in the denominator.
+        mse = float(np.sum(diff * diff) / (n_hole * p.shape[1]))
         if mse <= _EPS:
             out[i] = float("inf")
         else:
             out[i] = 10.0 * float(np.log10((data_range * data_range) / mse))
     if per_case:
         return out
-    valid = out > 0
+    # Zero dB is a valid score; validity is determined by mask presence.
+    valid = np.asarray([
+        float((m[0] if m.shape[0] == 1 else m[i]).sum()) > 0
+        for i in range(B)
+    ], dtype=bool)
     if not valid.any():
         return 0.0
     return float(out[valid].mean())
@@ -147,11 +151,8 @@ def boundary_l1(
 ) -> Union[float, np.ndarray]:
     """Mean L1 error inside the mask boundary band.
 
-    The band is the union of:
-    * a ``band_px``-wide dilation of the hole;
-    * a ``band_px``-wide erosion of the hole;
-
-    so it captures the immediate inside and outside of the boundary.
+    The band is the dilation of the hole minus its erosion, each with
+    radius ``band_px``, capturing the immediate inside and outside boundary.
     Pixels inside the hole but outside the band are excluded.
 
     Empty masks return 0.0.
@@ -184,7 +185,11 @@ def boundary_l1(
         out[i] = float(diff[band].mean())
     if per_case:
         return out
-    valid = out > 0
+    valid = np.asarray([
+        float((m[0] if m.shape[0] == 1 else m[i]).sum()) > 0
+        and bool(_make_band((m[0] if m.shape[0] == 1 else m[i])[0], band_px).any())
+        for i in range(B)
+    ], dtype=bool)
     if not valid.any():
         return 0.0
     return float(out[valid].mean())
@@ -267,7 +272,7 @@ def _make_band(mask2d: np.ndarray, band_px: int) -> np.ndarray:
     mask = mask2d.astype(np.float32)
     eroded = _erode(mask, band_px)
     dilated = _dilate(mask, band_px)
-    band = ((dilated > 0) & (eroded == 0)) | (mask > 0)
+    band = (dilated > 0) & (eroded == 0)
     return band.astype(bool)
 
 
@@ -387,12 +392,9 @@ def aggregate_per_case(
     by_group: Dict[str, Dict[Any, List[float]]] = {}
 
     for m in metrics_list:
-        if m.get("empty", False) or m.get("hole_psnr", 0.0) in (None, 0.0):
-            # Treat 0.0 PSNR as the empty case marker (we use 0.0
-            # for empty by convention in the per-case records).
-            empty = bool(m.get("empty", False)) or float(m.get("hole_psnr", 0.0)) <= 0.0
-        else:
-            empty = False
+        # Empty is a structural property of the mask.  When the producer
+        # supplies the flag, honour it; a numeric PSNR of 0 dB is valid.
+        empty = bool(m["empty"]) if "empty" in m else False
         if empty:
             empty_count += 1
             continue
