@@ -53,11 +53,11 @@ class OriginalRemovalBaseline(nn.Module):
         *,
         depth_features: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """Run one step using the common teacher interface.
+        """Run the unmodified 9-channel teacher.
 
-        ``depth_features`` is intentionally ignored.  Accepting it keeps
-        the original baseline usable by the same DDIM/cache call path as
-        the depth-conditioned wrapper.
+        ``depth_features`` is accepted (and ignored) so the baseline is
+        a drop-in for :class:`DepthConditionedRemoval` in callers that
+        pass the kwarg unconditionally (e.g. the shared DDIM loop).
         """
         B = noisy_latents.shape[0]
         if input_ids is None:

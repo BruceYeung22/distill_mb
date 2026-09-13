@@ -55,10 +55,13 @@ def pick_cases(
 def aggregate_rows(rows: List[Dict[str, float]]) -> Dict[str, float]:
     """Mean metrics over case rows + the composite score S."""
     if not rows:
-        return {"n": 0, "hole_l1": 0.0, "hole_lpips": 0.0, "global_l1": 0.0, "S": 0.0}
+        return {
+            "n": 0, "hole_l1": 0.0, "hole_lpips": 0.0, "global_l1": 0.0,
+            "S": 0.0, "known_max_error": 0.0, "hole_ratio": 0.0,
+        }
     mean = {
         k: float(np.mean([r[k] for r in rows]))
-        for k in ("hole_l1", "hole_lpips", "global_l1", "hole_ratio")
+        for k in ("hole_l1", "hole_lpips", "global_l1", "hole_ratio", "known_max_error")
     }
     mean["n"] = len(rows)
     mean["S"] = mean["hole_lpips"] + 3.0 * mean["hole_l1"] + mean["global_l1"]
@@ -79,8 +82,8 @@ def _build_model_for_run(
     from ..teachers.loader import load_removal_model
 
     base = load_removal_model(initial_weights, strict=True)
-    wrapped = DepthConditionedRemoval(base, DepthConditionAdapter())
     ckpt = run["checkpoint"]
+    wrapped = DepthConditionedRemoval(base, DepthConditionAdapter())
     if ckpt != "initial":
         payload = torch.load(ckpt, map_location="cpu", weights_only=False)
         sd = payload["model_state"]
@@ -247,7 +250,7 @@ def run_evaluation(
             lines.append(
                 f"| {run['label']} | {summary['n']} | {summary['hole_lpips']:.4f} | "
                 f"{summary['hole_l1']:.4f} | {summary['global_l1']:.4f} | "
-                f"{summary['S']:.4f} | - |"
+                f"{summary['S']:.4f} | {summary['known_max_error']:.6f} |"
             )
             del model
             if torch.cuda.is_available():
