@@ -195,3 +195,40 @@ def test_traj_train_rejects_oversized_microbatch():
             config=TrajTrainConfig(steps=2, microbatch=8),
             device=torch.device("cpu"), log=lambda _m: None,
         )
+
+
+def test_rollout_student_grid_uses_student_schedule():
+    """grid='student': 10 teacher forwards on the student's own timesteps;
+    captured eps[i] is the stub evaluated at the state reached by the
+    10-step chain."""
+    torch.manual_seed(6)
+    B, size = 2, 16
+    batch = {
+        "ml": torch.randn(B, 4, size, size),
+        "latent_mask": (torch.rand(B, 1, size, size) > 0.5).float(),
+        "df": torch.randn(B, 2, size, size),
+    }
+    noise = torch.randn(B, 4, size, size)
+    fn, calls = _stub_teacher(0.5)
+    eps_traj = rollout_states(teacher_fn=fn, batch=batch, noise=noise,
+                              schedule=SCHEDULE, grid="student")
+    assert eps_traj.shape == (B, SCHEDULE.num_steps, 4, size, size)
+    assert set(calls["t"]) == set(SCHEDULE.timesteps.tolist())  # only 10 grid points
+
+    x = noise.clone()
+    for i in range(SCHEDULE.num_steps):
+        assert torch.allclose(eps_traj[:, i], x[:, :4] * 0.5, atol=1e-5)
+        ab_t = SCHEDULE.alphas_bar[i].view(1, 1, 1, 1)
+        ab_prev = (SCHEDULE.alphas_bar[i + 1].view(1, 1, 1, 1)
+                   if i + 1 < SCHEDULE.num_steps
+                   else SCHEDULE.final_alpha_bar.view(1, 1, 1, 1))
+        pred_x0 = (x - (1 - ab_t).sqrt() * (x[:, :4] * 0.5)) / ab_t.sqrt()
+        x = ab_prev.sqrt() * pred_x0 + (1 - ab_prev).sqrt() * (x[:, :4] * 0.5)
+
+
+def test_rollout_rejects_bad_grid():
+    batch = {"ml": torch.randn(1, 4, 16, 16),
+             "latent_mask": torch.ones(1, 1, 16, 16), "df": torch.randn(1, 2, 16, 16)}
+    with pytest.raises(ValueError, match="grid"):
+        rollout_states(teacher_fn=_stub_teacher()[0], batch=batch,
+                       noise=torch.randn(1, 4, 16, 16), schedule=SCHEDULE, grid="bogus")

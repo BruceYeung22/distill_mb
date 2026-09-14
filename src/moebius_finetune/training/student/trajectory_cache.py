@@ -60,41 +60,58 @@ def rollout_states(
     batch: Dict[str, torch.Tensor],
     noise: torch.Tensor,
     schedule: StudentSchedule,
+    grid: str = "teacher",
 ) -> torch.Tensor:
-    """Run the teacher's 20-step DDIM rollout for a batch of cases.
+    """Run a teacher DDIM rollout for a batch of cases and capture epsilons.
 
-    ``batch`` holds GPU tensors ``[B, ...]`` (``x0`` unused here, needs
-    ``ml``/``latent_mask``/``df``). ``noise`` is ``[B, 4, h, w]``. The
-    teacher is queried at every grid step; the epsilons produced at the
-    even positions (the student's 10 timesteps) are stacked.
+    ``grid="teacher"`` walks the teacher's full 20-step grid (the
+    original schedule-subsample scheme; 20 teacher forwards per
+    trajectory). ``grid="student"`` walks the **student's own 10-step
+    schedule** — the teacher is queried exactly at the timesteps the
+    student will visit at inference, integrating with 10 larger DDIM
+    jumps (10 forwards per trajectory). The student grid is both half
+    the rollout cost and the tighter match to the student's inference
+    state distribution; it is the mode used for the full-manifest run.
 
-    Returns ``[B, num_steps, 4, h, w]`` float32 epsilons — the distillation
-    targets along the trajectory the teacher actually walked.
+    ``batch`` holds GPU tensors ``[B, ...]`` (``ml``/``latent_mask``/
+    ``df``). ``noise`` is ``[B, 4, h, w]``. Returns ``[B, num_steps,
+    4, h, w]`` float32 epsilons.
     """
-    t_full = schedule.full_timesteps().to(batch["ml"].device)
-    ab_full = schedule.alphas_bar_full.to(batch["ml"].device)
-    final_ab = schedule.final_alpha_bar.to(batch["ml"].device)
-
+    if grid not in ("teacher", "student"):
+        raise ValueError(f"grid must be 'teacher' or 'student', got {grid!r}")
+    device = batch["ml"].device
+    ab_full = schedule.alphas_bar_full.to(device)
+    final_ab = schedule.final_alpha_bar.to(device)
     ml, latent_mask, df = batch["ml"], batch["latent_mask"], batch["df"]
-    noisy = noise.to(device=ml.device, dtype=torch.float32)
+
+    if grid == "teacher":
+        grid_ts = schedule.full_timesteps().to(device)
+        ab_of = lambda t: ab_full[t]
+    else:
+        grid_ts = schedule.timesteps.to(device)
+        ab_of = lambda i: schedule.alphas_bar.to(device)[i]
+
+    noisy = noise.to(device=device, dtype=torch.float32)
     captured: List[Optional[torch.Tensor]] = [None] * schedule.num_steps
 
-    for pos in range(t_full.shape[0]):
-        t = int(t_full[pos].item())
-        ab_t = ab_full[t].view(1, 1, 1, 1)
-        if pos + 1 < t_full.shape[0]:
-            ab_prev = ab_full[int(t_full[pos + 1].item())].view(1, 1, 1, 1)
+    for pos in range(grid_ts.shape[0]):
+        t = int(grid_ts[pos].item())
+        ab_t = (ab_full[t] if grid == "teacher" else schedule.alphas_bar.to(device)[pos]).view(1, 1, 1, 1)
+        if pos + 1 < grid_ts.shape[0]:
+            nxt = int(grid_ts[pos + 1].item())
+            ab_prev = (ab_full[nxt] if grid == "teacher" else schedule.alphas_bar.to(device)[pos + 1]).view(1, 1, 1, 1)
         else:
             ab_prev = final_ab.view(1, 1, 1, 1)
         x9 = torch.cat([noisy, latent_mask, ml], dim=1)
-        t_tensor = torch.tensor([t], dtype=torch.int64, device=ml.device).expand(
-            noisy.shape[0]
-        )
-        with torch.autocast(device_type=ml.device.type, dtype=torch.bfloat16):
+        t_tensor = torch.tensor([t], dtype=torch.int64, device=device).expand(noisy.shape[0])
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
             eps = teacher_fn(x9, t_tensor, df)
         eps = eps.detach().float()
-        if pos % 2 == 0:
-            captured[pos // 2] = eps
+        if grid == "teacher":
+            if pos % 2 == 0:
+                captured[pos // 2] = eps
+        else:
+            captured[pos] = eps
         pred_x0 = (noisy - (1.0 - ab_t).sqrt() * eps) / ab_t.sqrt()
         noisy = ab_prev.sqrt() * pred_x0 + (1.0 - ab_prev).sqrt() * eps
 
