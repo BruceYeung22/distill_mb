@@ -46,7 +46,7 @@ from PIL import Image
 
 from ..contracts import Direction
 from .depth_normalization import DepthNormalizationApplier
-from .grt import compute_grt_mask
+from .grt import apply_p99_normalization, compute_grt_mask
 
 
 __all__ = [
@@ -265,16 +265,21 @@ def build_case(
         )
     applier = DepthNormalizationApplier.from_disparity(disp)
 
+    # The warp field must be the p99-normalised disparity (clipped to
+    # [0, 1]) — same cache contract as pipeline_512.build_512_sample —
+    # so dmax_px really means "max displacement in pixels". Feeding the
+    # raw ZipDepth values here shrinks every hole by ~1/p99 (~7x).
+    d_norm = apply_p99_normalization(disp)
     mask_bool = compute_grt_mask(
         (size, size),
-        disp * np.float32(case.dmax_px),
+        d_norm * np.float32(case.dmax_px),
         Direction(case.direction),
         dmax_px=int(case.dmax_px),
     )
     mask_f = mask_bool.astype(np.float32)[None]  # (1, s, s)
 
     sign = -1 if case.direction == "L2R" else 1
-    depth_signed = applier.apply(disp, direction_sign=sign)  # (s, s) in [-1, 1]
+    depth_signed = d_norm * np.float32(sign)  # == applier.apply(disp, sign)
 
     return {
         "rgb_hole": (rgb * (1.0 - mask_f)).astype(np.float32),
