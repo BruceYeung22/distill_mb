@@ -131,6 +131,21 @@ class StudentSchedule:
     # Inference-side DDIM update (eta = 0)
     # ------------------------------------------------------------------
 
+    def full_timesteps(self) -> torch.Tensor:
+        """The teacher's full inference grid this table was subsampled from.
+
+        For the default config this is the 20-step descending grid
+        ``[951, 901, ..., 1]`` (``arange(n)·ratio + offset``, flipped).
+        The trajectory rollout walks this grid and captures epsilons at
+        the even positions (= :attr:`timesteps`).
+        """
+        cfg = self.scheduler_config
+        n_train = int(cfg.get("num_train_timesteps", 1000))
+        n_infer = int(cfg.get("num_inference_steps", 20))
+        offset = int(cfg.get("steps_offset", 1))
+        grid = torch.arange(0, n_infer, dtype=torch.int64) * (n_train // n_infer) + offset
+        return torch.flip(grid, dims=[0]).contiguous()
+
     def ddim_step(
         self,
         x_t: torch.Tensor,
