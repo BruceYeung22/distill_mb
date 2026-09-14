@@ -153,45 +153,88 @@ class TrajectoryRamCache:
     are rolled out. Nothing here is ever serialized to disk.
     """
 
-    def __init__(self, schedule: StudentSchedule, latent_hw: int = 64) -> None:
+    def __init__(
+        self,
+        schedule: StudentSchedule,
+        latent_hw: int = 64,
+        capacity: Optional[int] = None,
+    ) -> None:
+        """``capacity`` preallocates pinned buffers up-front.
+
+        Preallocation avoids the 2× transient of ``torch.cat`` at
+        finalize time when the total trajectory count is known (the
+        full-manifest run pins ~55 GB — doubling that peak is not an
+        option). Without a capacity the cache accumulates chunks and
+        concatenates at :meth:`finalize`.
+        """
         self.schedule = schedule
         self.latent_hw = latent_hw
-        self._eps: List[torch.Tensor] = []
-        self._noise: List[torch.Tensor] = []
-        self._case_idx: List[torch.Tensor] = []
+        self._capacity = capacity
+        self._filled = 0
         self._eps_p: Optional[torch.Tensor] = None
         self._noise_p: Optional[torch.Tensor] = None
         self._case_idx_p: Optional[torch.Tensor] = None
+        self._eps_chunks: List[torch.Tensor] = []
+        self._noise_chunks: List[torch.Tensor] = []
+        self._case_chunks: List[torch.Tensor] = []
+        if capacity is not None and capacity > 0:
+            S = schedule.num_steps
+            shape_eps = (capacity, S, 4, latent_hw, latent_hw)
+            self._eps_p = torch.empty(shape_eps, dtype=torch.bfloat16, pin_memory=True)
+            self._noise_p = torch.empty(
+                (capacity, 4, latent_hw, latent_hw), dtype=torch.bfloat16, pin_memory=True
+            )
+            self._case_idx_p = torch.empty((capacity,), dtype=torch.int64, pin_memory=True)
 
     def extend(self, eps: torch.Tensor, noise: torch.Tensor, case_idx: torch.Tensor) -> None:
-        """Append a rollout batch (CPU tensors); degrades to unpinned until finalize."""
+        """Append a rollout batch (CPU tensors).
+
+        With a preallocated capacity the batch is written into the
+        pinned buffer at the fill pointer; otherwise it accumulates
+        until :meth:`finalize`.
+        """
         if eps.dim() != 5 or eps.shape[1] != self.schedule.num_steps:
             raise ValueError(
                 f"eps must be [B, {self.schedule.num_steps}, 4, h, w], got {tuple(eps.shape)}"
             )
         if eps.shape[0] != noise.shape[0] or noise.shape[0] != case_idx.shape[0]:
             raise ValueError("eps/noise/case_idx batch sizes disagree")
-        self._eps.append(eps.detach().to("cpu", dtype=torch.bfloat16))
-        self._noise.append(noise.detach().to("cpu", dtype=torch.bfloat16))
-        self._case_idx.append(case_idx.detach().to("cpu", dtype=torch.int64))
-        self._eps_p = self._noise_p = self._case_idx_p = None
+        if self._capacity is not None:
+            n = eps.shape[0]
+            if self._filled + n > self._capacity:
+                raise OverflowError(
+                    f"cache capacity {self._capacity} exceeded at fill={self._filled}+{n}"
+                )
+            s = self._filled
+            self._eps_p[s : s + n].copy_(eps.detach().to("cpu", dtype=torch.bfloat16))
+            self._noise_p[s : s + n].copy_(noise.detach().to("cpu", dtype=torch.bfloat16))
+            self._case_idx_p[s : s + n].copy_(case_idx.detach().to("cpu", dtype=torch.int64))
+            self._filled += n
+            return
+        self._eps_chunks.append(eps.detach().to("cpu", dtype=torch.bfloat16))
+        self._noise_chunks.append(noise.detach().to("cpu", dtype=torch.bfloat16))
+        self._case_chunks.append(case_idx.detach().to("cpu", dtype=torch.int64))
 
     def finalize(self) -> "TrajectoryRamCache":
-        """Concatenate chunks and pin the flat tensors for fast H2D."""
-        if not self._eps:
+        """Concatenate accumulated chunks and pin them (no-op when preallocated)."""
+        if self._capacity is not None:
+            if self._filled == 0:
+                raise ValueError("cache is empty")
+            return self
+        if not self._eps_chunks:
             raise ValueError("cache is empty")
-        eps = torch.cat(self._eps).contiguous()
-        noise = torch.cat(self._noise).contiguous()
-        case_idx = torch.cat(self._case_idx).contiguous()
-        self._eps, self._noise, self._case_idx = [eps], [noise], [case_idx]
+        eps = torch.cat(self._eps_chunks).contiguous()
+        noise = torch.cat(self._noise_chunks).contiguous()
+        case_idx = torch.cat(self._case_chunks).contiguous()
         self._eps_p = eps.pin_memory()
         self._noise_p = noise.pin_memory()
         self._case_idx_p = case_idx.pin_memory()
+        self._filled = eps.shape[0]
         return self
 
     @property
     def num_traj(self) -> int:
-        return int(self._case_idx_p.shape[0]) if self._case_idx_p is not None else 0
+        return self._filled
 
     def sample(
         self, n: int, generator: Optional[torch.Generator] = None
@@ -224,10 +267,9 @@ class TrajectoryRamCache:
     def ram_gb(self) -> float:
         if self._eps_p is None:
             return 0.0
-        return (
-            self._eps_p.numel() * self._eps_p.element_size()
-            + self._noise_p.numel() * self._noise_p.element_size()
-        ) / 1024**3
+        eps_bytes = self._filled * self.schedule.num_steps * 4 * self.latent_hw**2 * self._eps_p.element_size()
+        noise_bytes = self._filled * 4 * self.latent_hw**2 * self._noise_p.element_size()
+        return (eps_bytes + noise_bytes) / 1024**3
 
 
 # ---------------------------------------------------------------------------

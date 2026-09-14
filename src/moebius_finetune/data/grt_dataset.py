@@ -237,28 +237,37 @@ def build_case(
     case: CaseSpec,
     *,
     image_dir: Union[str, Path],
-    predictor: Predictor,
+    predictor: Optional[Predictor] = None,
     size: int = 512,
+    disp: Optional[np.ndarray] = None,
 ) -> Dict[str, np.ndarray]:
     """Compute one GRT case's tensors with **online** ZipDepth (TDD2 §3).
 
     ``predictor`` maps ``bgr_uint8 (H,W,3)`` → disparity ``(H,W)``.
+    Callers that already computed the disparity for this source image
+    (e.g. building all four direction/dmax cases of one image) may pass
+    ``disp`` directly and omit ``predictor`` — exactly one of the two
+    must be given. The disparity itself is never persisted.
 
     Returns ``rgb_hole (3,s,s)``, ``hole_mask (1,s,s)``,
     ``depth_hole (1,s,s)`` (hole-zeroed, signed, p99-normalised),
     ``target (3,s,s)`` (the clean source), and scalar ``hole_ratio``.
     """
     rgb = _load_source_rgb01(image_dir, case.source_id, size)
-    disp = np.asarray(
-        predictor(
-            np.clip(
-                rgb.transpose(1, 2, 0)[..., ::-1] * np.float32(255.0),
-                0.0,
-                255.0,
-            ).astype(np.uint8)
-        ),
-        dtype=np.float32,
-    )
+    if disp is None:
+        if predictor is None:
+            raise ValueError("build_case needs exactly one of predictor or disp")
+        disp = np.asarray(
+            predictor(
+                np.clip(
+                    rgb.transpose(1, 2, 0)[..., ::-1] * np.float32(255.0),
+                    0.0,
+                    255.0,
+                ).astype(np.uint8)
+            ),
+            dtype=np.float32,
+        )
+    disp = np.asarray(disp, dtype=np.float32)
     if disp.shape != (size, size):
         raise ValueError(
             f"predictor returned shape {disp.shape}, expected {(size, size)}"
