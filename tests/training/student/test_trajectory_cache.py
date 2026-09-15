@@ -232,3 +232,62 @@ def test_rollout_rejects_bad_grid():
     with pytest.raises(ValueError, match="grid"):
         rollout_states(teacher_fn=_stub_teacher()[0], batch=batch,
                        noise=torch.randn(1, 4, 16, 16), schedule=SCHEDULE, grid="bogus")
+
+
+def test_state_loss_weights_change_loss_math(tmp_path):
+    """Wrong length raises; the reported weighted loss equals the manual
+    weighted mean on the same (RNG-replayed) final batch."""
+    torch.manual_seed(7)
+    B, size = 2, 16
+    batch = {
+        "ml": torch.randn(B, 4, size, size),
+        "latent_mask": torch.ones(B, 1, size, size),
+        "df": torch.randn(B, 2, size, size),
+    }
+    noise = torch.randn(B, 4, size, size)
+    eps_traj = rollout_states(teacher_fn=_stub_teacher(0.5)[0], batch=batch,
+                              noise=noise, schedule=SCHEDULE)
+    cache = TrajectoryRamCache(SCHEDULE)
+    cache.extend(eps_traj, noise, torch.zeros(B, dtype=torch.int64))
+    cache.finalize()
+
+    bad = TrajTrainConfig(steps=2, microbatch=2, state_loss_weights=[1.0, 2.0])
+    with pytest.raises(ValueError, match="10 entries"):
+        train_mobile_student_traj(student=_tiny_student(), bank=_fake_bank(),
+                                  cache=cache, schedule=SCHEDULE, config=bad,
+                                  device=torch.device("cpu"), log=lambda _m: None)
+
+    weights = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 8.0]
+    bk = _fake_bank()
+    student = _tiny_student()
+    hist = train_mobile_student_traj(
+        student=student, bank=bk, cache=cache, schedule=SCHEDULE,
+        config=TrajTrainConfig(steps=3, microbatch=2, lr=1e-9, cosine_to=0.0,
+                               warmup=0, state_loss_weights=weights,
+                               log_every=1, seed=0),
+        device=torch.device("cpu"), log=lambda _m: None,
+    )
+    assert hist[-1].step == 3
+
+    # Replay the loop's global-RNG draws (one randint per step) to land on
+    # the same final batch; lr=1e-9 keeps the params ≈ initial, so the
+    # recomputed loss must match the reported one.
+    torch.manual_seed(0)
+    sample = None
+    for _ in range(3):
+        sample = cache.sample(2)
+    cond = {k: torch.cat([bk.entries[i][k] for i in sample["case_idx"].tolist()])
+            for k in ("x0", "ml", "latent_mask", "df")}
+    states = recompute_states(eps_traj=sample["eps"].float(),
+                              noise=sample["noise"].float(), schedule=SCHEDULE)
+    x11 = torch.cat([states.flatten(0, 1),
+                     cond["latent_mask"].repeat_interleave(10, 0),
+                     cond["ml"].repeat_interleave(10, 0),
+                     cond["df"].repeat_interleave(10, 0)], dim=1)
+    with torch.no_grad():
+        pred = student(x11, torch.arange(10).repeat(2))
+    target = sample["eps"].float().flatten(0, 1)
+    per = ((pred - target) ** 2).mean(dim=(1, 2, 3))
+    w = torch.tensor(weights).repeat(2)
+    expected = float((per * w).mean())
+    assert abs(hist[-1].loss - expected) < 1e-4, f"{hist[-1].loss} vs {expected}"

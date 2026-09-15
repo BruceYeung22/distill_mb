@@ -304,6 +304,11 @@ class TrajTrainConfig(MobileDistillConfig):
     """
 
     cosine_to: float = 1e-4
+    #: Optional per-state loss weights (length == schedule.num_steps).
+    #: The 16-case and full-data diagnoses both show the low-noise end
+    #: (t=151/51) 10-15x worse than the high-noise end; a ramp that
+    #: upweights the late states is the cheap first lever (TDD3 §8b-a).
+    state_loss_weights: Optional[List[float]] = None
 
 
 def _lr_at(step: int, total: int, cfg: TrajTrainConfig) -> float:
@@ -372,7 +377,17 @@ def train_mobile_student_traj(
         step_idx = torch.arange(S, device=device).repeat(B)
         pred = student(x11, step_idx)
         target = eps_traj.reshape(B * S, *eps_traj.shape[2:])
-        loss = F.mse_loss(pred, target) / config.grad_accum
+        per_state = ((pred - target) ** 2).mean(dim=tuple(range(1, pred.dim())))
+        if config.state_loss_weights is not None:
+            if len(config.state_loss_weights) != S:
+                raise ValueError(
+                    f"state_loss_weights must have {S} entries, got "
+                    f"{len(config.state_loss_weights)}"
+                )
+            w = torch.tensor(config.state_loss_weights, device=device, dtype=torch.float32)
+            loss = (per_state * w.repeat(B)).mean() / config.grad_accum
+        else:
+            loss = per_state.mean() / config.grad_accum
         loss.backward()
         accum += 1
 
@@ -420,6 +435,7 @@ def _save_traj(
                 "microbatch": config.microbatch,
                 "lr": config.lr,
                 "cosine_to": config.cosine_to,
+                "state_loss_weights": config.state_loss_weights,
                 "seed": config.seed,
                 "objective": "trajectory-eps-MSE",
             },
