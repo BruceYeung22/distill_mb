@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from moebius_finetune.students.mobile_moebius import MobileMoebius
 from moebius_finetune.students.schedule import StudentSchedule
@@ -104,7 +105,7 @@ def test_recompute_states_matches_manual_chain():
     B, size = 2, 16
     eps_traj = torch.randn(B, SCHEDULE.num_steps, 4, size, size)
     noise = torch.randn(B, 4, size, size)
-    states = recompute_states(eps_traj=eps_traj, noise=noise, schedule=SCHEDULE)
+    states, final = recompute_states(eps_traj=eps_traj, noise=noise, schedule=SCHEDULE)
     assert states.shape == (B, SCHEDULE.num_steps, 4, size, size)
 
     x = noise.clone()
@@ -118,6 +119,7 @@ def test_recompute_states_matches_manual_chain():
         )
         pred_x0 = (x - (1 - ab_t).sqrt() * eps_traj[:, i]) / ab_t.sqrt()
         x = ab_prev.sqrt() * pred_x0 + (1 - ab_prev).sqrt() * eps_traj[:, i]
+    assert torch.allclose(final, x, atol=1e-5)  # chain endpoint == manual end
 
 
 def test_ram_cache_roundtrip_and_sampling():
@@ -278,8 +280,8 @@ def test_state_loss_weights_change_loss_math(tmp_path):
         sample = cache.sample(2)
     cond = {k: torch.cat([bk.entries[i][k] for i in sample["case_idx"].tolist()])
             for k in ("x0", "ml", "latent_mask", "df")}
-    states = recompute_states(eps_traj=sample["eps"].float(),
-                              noise=sample["noise"].float(), schedule=SCHEDULE)
+    states, _ = recompute_states(eps_traj=sample["eps"].float(),
+                                 noise=sample["noise"].float(), schedule=SCHEDULE)
     x11 = torch.cat([states.flatten(0, 1),
                      cond["latent_mask"].repeat_interleave(10, 0),
                      cond["ml"].repeat_interleave(10, 0),
@@ -290,4 +292,58 @@ def test_state_loss_weights_change_loss_math(tmp_path):
     per = ((pred - target) ** 2).mean(dim=(1, 2, 3))
     w = torch.tensor(weights).repeat(2)
     expected = float((per * w).mean())
+    assert abs(hist[-1].loss - expected) < 1e-4, f"{hist[-1].loss} vs {expected}"
+
+
+def test_x0_endpoint_weight_changes_loss_math():
+    """x0 anchor loss = w · MSE(x̂0_student(state_i), chain_final) added on
+    top of the eps loss; verified on an RNG-replayed batch."""
+    torch.manual_seed(8)
+    B, size = 2, 16
+    batch = {
+        "ml": torch.randn(B, 4, size, size),
+        "latent_mask": torch.ones(B, 1, size, size),
+        "df": torch.randn(B, 2, size, size),
+    }
+    noise = torch.randn(B, 4, size, size)
+    eps_traj = rollout_states(teacher_fn=_stub_teacher(0.5)[0], batch=batch,
+                              noise=noise, schedule=SCHEDULE)
+    cache = TrajectoryRamCache(SCHEDULE)
+    cache.extend(eps_traj, noise, torch.zeros(B, dtype=torch.int64))
+    cache.finalize()
+
+    bk = _fake_bank()
+    student = _tiny_student()
+    W = 0.5
+    hist = train_mobile_student_traj(
+        student=student, bank=bk, cache=cache, schedule=SCHEDULE,
+        config=TrajTrainConfig(steps=3, microbatch=2, lr=1e-9, cosine_to=0.0,
+                               warmup=0, x0_endpoint_weight=W,
+                               log_every=1, seed=0),
+        device=torch.device("cpu"), log=lambda _m: None,
+    )
+
+    torch.manual_seed(0)
+    sample = None
+    for _ in range(3):
+        sample = cache.sample(2)
+    cond = {k: torch.cat([bk.entries[i][k] for i in sample["case_idx"].tolist()])
+            for k in ("x0", "ml", "latent_mask", "df")}
+    eps_traj = sample["eps"].float()
+    states, final = recompute_states(eps_traj=eps_traj, noise=sample["noise"].float(),
+                                     schedule=SCHEDULE)
+    x11 = torch.cat([states.flatten(0, 1), cond["latent_mask"].repeat_interleave(10, 0),
+                     cond["ml"].repeat_interleave(10, 0), cond["df"].repeat_interleave(10, 0)], dim=1)
+    with torch.no_grad():
+        pred = student(x11, torch.arange(10).repeat(2))
+    target = eps_traj.flatten(0, 1)
+    per = ((pred - target) ** 2).mean(dim=(1, 2, 3))
+    eps_loss = float(per.mean())
+
+    ab = SCHEDULE.alphas_bar.view(1, 10, 1, 1, 1)
+    eps_s = pred.view(B, SCHEDULE.num_steps, *pred.shape[1:])
+    x0_pred = ((states - (1 - ab).sqrt() * eps_s) / ab.sqrt()).flatten(0, 1)
+    anchor = final.float().repeat_interleave(10, dim=0)
+    x0_loss = float(F.mse_loss(x0_pred, anchor))
+    expected = eps_loss + W * x0_loss
     assert abs(hist[-1].loss - expected) < 1e-4, f"{hist[-1].loss} vs {expected}"

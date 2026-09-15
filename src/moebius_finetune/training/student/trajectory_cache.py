@@ -131,8 +131,9 @@ def recompute_states(
 
     ``eps_traj`` ``[B, S, 4, h, w]``, ``noise`` ``[B, 4, h, w]`` →
     ``[B, S, 4, h, w]`` where entry ``i`` is the state at
-    ``schedule.timesteps[i]``. Deterministic: the same eta=0 DDIM chain
-    the rollout used.
+    ``schedule.timesteps[i]``, plus the chain's endpoint latent (the
+    teacher's implied clean answer). Deterministic: the same eta=0 DDIM
+    chain the rollout used.
     """
     ab = schedule.alphas_bar.to(eps_traj.device, dtype=eps_traj.dtype)
     ab = ab.view(1, schedule.num_steps, 1, 1, 1)
@@ -144,6 +145,7 @@ def recompute_states(
 
     noisy = noise.to(dtype=eps_traj.dtype).unsqueeze(1)  # [B,1,4,h,w]
     states = []
+    final: Optional[torch.Tensor] = None
     for i in range(schedule.num_steps):
         states.append(noisy[:, 0])
         eps_i = eps_traj[:, i].unsqueeze(1)
@@ -153,7 +155,10 @@ def recompute_states(
         noisy = ab_prev[:, i : i + 1].sqrt() * pred_x0 + (
             1.0 - ab_prev[:, i : i + 1]
         ).sqrt() * eps_i
-    return torch.stack(states, dim=1)
+        final = noisy[:, 0]
+    # The chain endpoint is the teacher's implied clean latent — the
+    # consistency anchor for x0_endpoint_weight > 0.
+    return torch.stack(states, dim=1), final
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +314,12 @@ class TrajTrainConfig(MobileDistillConfig):
     #: (t=151/51) 10-15x worse than the high-noise end; a ramp that
     #: upweights the late states is the cheap first lever (TDD3 §8b-a).
     state_loss_weights: Optional[List[float]] = None
+    #: Consistency anchor weight (TDD Part II §IV.2 option c): adds
+    #: ``w · MSE(x0_student(state_i), teacher_chain_final)`` on top of the
+    #: eps objective — every visited state is pulled towards the SAME
+    #: endpoint, so the student's own trajectory cannot wander. 0 = pure
+    #: eps objective (v2/v3 behaviour).
+    x0_endpoint_weight: float = 0.0
 
 
 def _lr_at(step: int, total: int, cfg: TrajTrainConfig) -> float:
@@ -361,7 +372,9 @@ def train_mobile_student_traj(
         cond = _gather_cases(bank, sample["case_idx"].cpu(), device)
         eps_traj = sample["eps"].to(device, non_blocking=True).float()
         noise = sample["noise"].to(device, non_blocking=True).float()
-        states = recompute_states(eps_traj=eps_traj, noise=noise, schedule=schedule)
+        states, final_lat = recompute_states(
+            eps_traj=eps_traj, noise=noise, schedule=schedule
+        )
 
         B = states.shape[0]
         x_flat = states.reshape(B * S, *states.shape[2:])
@@ -388,6 +401,15 @@ def train_mobile_student_traj(
             loss = (per_state * w.repeat(B)).mean() / config.grad_accum
         else:
             loss = per_state.mean() / config.grad_accum
+        if config.x0_endpoint_weight > 0:
+            ab_s = schedule.alphas_bar.to(device=device, dtype=torch.float32)
+            ab_s = ab_s.view(1, S, 1, 1, 1)
+            eps_s = pred.view(B, S, *pred.shape[1:])
+            x0_pred = ((states - (1.0 - ab_s).sqrt() * eps_s) / ab_s.sqrt()).flatten(0, 1)
+            anchor = final_lat.detach().float().repeat_interleave(S, dim=0)
+            loss = loss + config.x0_endpoint_weight * (
+                F.mse_loss(x0_pred, anchor) / config.grad_accum
+            )
         loss.backward()
         accum += 1
 
@@ -436,6 +458,7 @@ def _save_traj(
                 "lr": config.lr,
                 "cosine_to": config.cosine_to,
                 "state_loss_weights": config.state_loss_weights,
+                "x0_endpoint_weight": config.x0_endpoint_weight,
                 "seed": config.seed,
                 "objective": "trajectory-eps-MSE",
             },
