@@ -40,10 +40,12 @@ from ...students.schedule import StudentSchedule
 from .mobile_distill import CaseBank, MobileDistillConfig, TrainStats
 
 __all__ = [
+    "OnPolicyConfig",
     "TrajectoryRamCache",
     "TrajTrainConfig",
     "rollout_states",
     "recompute_states",
+    "train_mobile_student_onpolicy",
     "train_mobile_student_traj",
 ]
 
@@ -461,6 +463,186 @@ def _save_traj(
                 "x0_endpoint_weight": config.x0_endpoint_weight,
                 "seed": config.seed,
                 "objective": "trajectory-eps-MSE",
+            },
+            "schedule": {
+                "timesteps": schedule.timesteps.tolist(),
+                "scheduler_config": dict(schedule.scheduler_config),
+            },
+        },
+        path,
+    )
+    return path
+
+
+# ---------------------------------------------------------------------------
+# True on-policy consistency distillation (TDD Part II §IV.2 option c-full)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OnPolicyConfig:
+    """Hyperparameters for on-policy teacher-corrected distillation.
+
+    The student rolls out its OWN trajectory (its eps drives the DDIM
+    steps), the teacher corrects at each visited state, and the loss
+    regresses the student's eps onto the teacher's at those states.
+    This is the only variant that trains on the exact state
+    distribution the student visits at inference — v2/v3/v4 all
+    trained on cached teacher-chain states and plateaued at ~0.19.
+    """
+
+    steps: int = 2000
+    microbatch: int = 8
+    lr: float = 1.0e-4
+    cosine_to: float = 2.0e-5
+    warmup: int = 100
+    max_grad_norm: float = 1.0
+    seed: int = 0
+    save_every: int = 500
+    log_every: int = 50
+    history: List[TrainStats] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.steps <= 0 or self.microbatch <= 0:
+            raise ValueError("steps and microbatch must be positive")
+        if self.lr <= 0:
+            raise ValueError(f"lr must be positive, got {self.lr}")
+
+
+@torch.no_grad()
+def onpolicy_rollout(
+    student: nn.Module,
+    teacher_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    cond: Dict[str, torch.Tensor],
+    noise: torch.Tensor,
+    schedule: StudentSchedule,
+) -> tuple:
+    """Student self-rollout with teacher correction at each visited state.
+
+    The DDIM steps are driven by the **student's** eps (no grad), so the
+    visited states are exactly the states the student traverses at
+    inference. Returns ``(states [B, S, 4, h, w], eps_T [B, S, 4, h, w])``
+    — the teacher's correction at each of those states (stopgrad).
+    """
+    ml, lm, df = cond["ml"], cond["latent_mask"], cond["df"]
+    B = noise.shape[0]
+    device = noise.device
+    x = noise.to(dtype=torch.float32)
+    states: List[torch.Tensor] = []
+    eps_t: List[torch.Tensor] = []
+    for i in range(schedule.num_steps):
+        states.append(x)
+        t_i = int(schedule.timesteps[i].item())
+        t_tensor = torch.full((B,), t_i, dtype=torch.int64, device=device)
+        x9 = torch.cat([x, lm, ml], dim=1)
+        with torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            eps_ti = teacher_fn(x9, t_tensor, df)
+        eps_t.append(eps_ti.float())
+        step_idx = torch.full((B,), i, dtype=torch.int64, device=device)
+        x11 = torch.cat([x, lm, ml, df], dim=1)
+        eps_s = student(x11, step_idx)
+        x = schedule.ddim_step(x, eps_s.float(), i)
+    return torch.stack(states, dim=1), torch.stack(eps_t, dim=1)
+
+
+def _lr_cosine(step: int, total: int, cfg: OnPolicyConfig) -> float:
+    if step < cfg.warmup:
+        return cfg.lr * float(step + 1) / float(max(cfg.warmup, 1))
+    progress = (step - cfg.warmup) / max(total - cfg.warmup, 1)
+    return cfg.cosine_to + (cfg.lr - cfg.cosine_to) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+
+def train_mobile_student_onpolicy(
+    *,
+    student: nn.Module,
+    teacher_fn: Callable[[torch.Tensor, torch.Tensor, torch.Tensor], torch.Tensor],
+    bank: CaseBank,
+    schedule: StudentSchedule,
+    config: OnPolicyConfig,
+    device: torch.device,
+    output_dir: Optional[str] = None,
+    log: Callable[[str], None] = print,
+) -> List[TrainStats]:
+    """On-policy teacher-corrected distillation (warm-start expected).
+
+    The caller loads the best existing checkpoint into ``student``
+    before calling (e.g. traj@5000). Per update: the student rolls its
+    own 10-step trajectory for a microbatch of cases, the teacher
+    corrects at every visited state, and one batched grad forward
+    regresses the student's eps onto those corrections.
+    """
+    torch.manual_seed(config.seed)
+    student = student.to(device).train()
+    opt = torch.optim.AdamW(student.parameters(), lr=config.lr)
+    S = schedule.num_steps
+    history: List[TrainStats] = []
+    t_start = time.perf_counter()
+
+    for step in range(config.steps):
+        lr_now = _lr_cosine(step, config.steps, config)
+        for group in opt.param_groups:
+            group["lr"] = lr_now
+
+        case_idx = torch.randint(0, len(bank), (config.microbatch,))
+        cond = _gather_cases(bank, case_idx, device)
+        noise = torch.randn(config.microbatch, 4, cond["ml"].shape[-2],
+                            cond["ml"].shape[-1], device=device)
+        states, eps_t = onpolicy_rollout(student, teacher_fn, cond, noise, schedule)
+
+        B = states.shape[0]
+        x11 = torch.cat(
+            [
+                states.flatten(0, 1),
+                cond["latent_mask"].repeat_interleave(S, dim=0),
+                cond["ml"].repeat_interleave(S, dim=0),
+                cond["df"].repeat_interleave(S, dim=0),
+            ],
+            dim=1,
+        )
+        step_idx = torch.arange(S, device=device).repeat(B)
+        pred = student(x11, step_idx)
+        loss = F.mse_loss(pred, eps_t.flatten(0, 1).detach())
+        loss.backward()
+        grad_norm = float(nn.utils.clip_grad_norm_(
+            [p for g in opt.param_groups for p in g["params"]], config.max_grad_norm))
+        opt.step()
+        opt.zero_grad(set_to_none=True)
+
+        if (step + 1) % config.log_every == 0 or step == 0:
+            stats = TrainStats(step=step + 1, loss=float(loss.detach()),
+                               lr=lr_now, elapsed_s=time.perf_counter() - t_start)
+            history.append(stats)
+            config.history.append(stats)
+            log(f"step={stats.step} loss={stats.loss:.6f} lr={stats.lr:.2e} gn={grad_norm:.4f}")
+        if output_dir and (step + 1) % config.save_every == 0:
+            _save_onpolicy(student, schedule, config, step + 1, output_dir)
+
+    if output_dir:
+        _save_onpolicy(student, schedule, config, config.steps, output_dir)
+    return history
+
+
+def _save_onpolicy(
+    student: nn.Module,
+    schedule: StudentSchedule,
+    config: OnPolicyConfig,
+    step: int,
+    output_dir: str,
+) -> Path:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"student_step{step:07d}.pt"
+    torch.save(
+        {
+            "model_state": {k: v.detach().cpu() for k, v in student.state_dict().items()},
+            "step": step,
+            "config": {
+                "steps": config.steps,
+                "microbatch": config.microbatch,
+                "lr": config.lr,
+                "cosine_to": config.cosine_to,
+                "seed": config.seed,
+                "objective": "onpolicy-teacher-correction",
             },
             "schedule": {
                 "timesteps": schedule.timesteps.tolist(),
