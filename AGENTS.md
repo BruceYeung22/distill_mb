@@ -232,3 +232,14 @@ cd distill && MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
 - `src/moebius_finetune/students/AGENTS.md` — student architectures (pixel / latent / mobile / `moebius_small` / `gated` / common).
 - `src/moebius_finetune/training/student/AGENTS.md` — distillation loop, losses, prompt builder, LPIPS staging.
 - `scripts/AGENTS.md` — eval / viz drivers.
+
+## Analysis artefacts
+
+- `docs/teacher-profile-v1.md` — empirical profile of the 226M Moebius
+  teacher (latency + linear CKA + stage/block zero-ablation across
+  4 hole widths on synthetic GRT, plus block-level validation on the
+  32-case real COCO holdout). Drives the `MoebiusSmallStudent`
+  distillation design recommendations in §5 of that doc. Reproduce
+  with `scripts/bench_teacher_forward.py`,
+  `scripts/profile_teacher.py`, `scripts/profile_teacher_blocks.py`,
+  `scripts/profile_teacher_real.py`.
