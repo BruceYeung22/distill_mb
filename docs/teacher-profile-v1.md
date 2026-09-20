@@ -196,6 +196,60 @@ Top 5 load-bearing blocks on real COCO:
 **up2's last 2 blocks (resnet2 + attn2 = +1.1896) carry ~70% of up2's
 contribution on real data**, confirming the synthetic finding.
 
+## 4.5. Block-level linear CKA on real COCO 32-case (representation redundancy)
+
+`scripts/profile_teacher_real_cka.py`. Computes the 30×30 linear CKA
+matrix across all leaf modules on the same real COCO 32-case holdout,
+then cross-references CKA-to-load-bearing-anchor (`up2/resnet2`)
+against the block-level ablation deltas to identify the
+**redundancy-in-noise** pattern.
+
+CKA computation: global avg-pool each captured (B, C, H, W) to (B, C);
+random-project to 1024-d via a per-C-seeded projection (stable
+across runs). Kornblith et al. 2017 CKA on the (32, 1024) feature
+matrix per block.
+
+**Three findings** (real COCO 32-case, baseline in-hole L1 = 0.2514):
+
+1. **Spearman ρ(CKA-to-`up2/resnet2`, ΔL1) = +0.2659 (p = 0.156)** —
+   NOT statistically significant. Higher CKA to the load-bearing
+   anchor does NOT, in general, predict forward contribution.
+   **Clustering ≠ usefulness.**
+
+2. **up1 mean CKA to `up2/resnet2` = 0.917 (HIGH) AND all 6 up1 blocks
+   are reverse-contributing** (range ΔL1 −0.0944 to −0.0236).
+   This is the **redundancy-in-noise** pattern: up1 blocks re-encode
+   up2's good features (high CKA) but introduce noise on top
+   (negative ΔL1). **Strong empirical support for dropping dec1
+   entirely in MoebiusSmallStudent** — the work up1 does is
+   redundant and harmful.
+
+3. **up2's 6 blocks cluster tightly (intra-stage CKA ≥ 0.99 across
+   all pairs)** — yet only 4 of 6 contribute positively. The 2
+   reverse-contributing blocks (`up2/resnet0` ΔL1 −0.018, `up2/attn0`
+   ΔL1 −0.012) have CKA ≈ 0.998 to `up2/resnet2`, identical
+   representation to the load-bearing block but slightly noisier
+   version. **Redundancy-in-noise confirmed at the dominant stage
+   too**, not just up1.
+
+**15 tight cluster edges (off-diagonal CKA ≥ 0.95)** — mostly
+intra-stage (down0↔down0, down1↔down1, up2↔up2). Cross-stage
+clusters are sparser. `down2/attn1` is the most distinct block
+(CKA 0.35–0.45 to all others), yet its ΔL1 = −0.0011 (REDUNDANT) —
+**distinctness does not imply useful contribution**.
+
+**Distillation implication**: the redundancy-in-noise pattern is
+the strongest empirical evidence for the §5 recommendations:
+
+- **drop dec1** (up1): high CKA to up2 + all reverse → pure noise
+  injector on top of good features
+- **head upgrade**: not just "more blocks" but specifically
+  mirroring `up2/resnet2` (DW block) + `up2/attn2` (MixTF) so the
+  student's head occupies the same representation niche as the
+  teacher's load-bearing pair
+- The 2 reverse blocks within up2 itself (`up2/resnet0`, `up2/attn0`)
+  can be dropped from any future Moebius variant without loss.
+
 ## 5. Distillation design recommendations
 
 Cross-referencing synthetic and real findings, with `MoebiusSmallStudent`'s
@@ -290,10 +344,13 @@ combined variant (#5).
   editing `moebius.yaml` to add a `DWDownBlock2D` 4th down + `mid`
   block would change the stage count from 6 to 8. Verify
   `down_blocks` and `up_blocks` counts before re-running the scripts.
-- **No block-level CKA yet**: only stage-level CKA. A per-block CKA
-  pass would reveal which specific blocks have redundant
-  representations. Not done yet because it adds another 30-case
-  × 30-block × 1024-d feature collection (estimated +5 min on GB10).
+- **Block-level CKA on real COCO** (the prior open question): now
+  done — see §4.5. 30×30 linear CKA matrix + Spearman cross-correlation
+  with ablation deltas. Key result: up1's 6 blocks cluster tightly with
+  up2 (mean CKA 0.917) AND all reverse-contribute — the
+  **redundancy-in-noise** pattern. Spearman ρ(CKA-to-anchor,
+  ΔL1) = +0.27 (p=0.16) globally — clustering alone does not
+  predict usefulness, but the high-CKA-and-reverse subset does.
 
 ## 8. Reproduction
 
@@ -317,6 +374,10 @@ MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
 # 4. Block-level, real COCO 32-case (~2 min including ZipDepth online)
 MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
   .venv/bin/python scripts/profile_teacher_real.py
+
+# 5. Block-level CKA, real COCO 32-case (~1 min; closes §4.5 finding)
+MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
+  .venv/bin/python scripts/profile_teacher_real_cka.py
 ```
 
 All four scripts are strictly inside `distill/` and do not modify
