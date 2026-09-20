@@ -1,170 +1,234 @@
-# AGENTS.md — work split inside `finetune/`
+# AGENTS.md — `distill/`
 
-This file is the contract between the orchestrator (stage 0) and the
-three development agents (A, B, C) called out in TDD §10. It exists so
-that parallel work does not collide on the same file.
+DIBR hole-filling student distillation. 226M depth-conditioned Moebius
+teacher → 10.2M one-step student, RK3588 INT8 target.
 
-## Local environment (DGX Spark, aarch64) — read this first
+Sibling trees (`Moebius/`, `PixelHacker/`, `ZipDepth/`, `m2svid/`,
+`Hybrid-SD/`, `tdd/`) are pinned upstream references — **read-only**.
+Workspace map: [`../AGENTS.md`](../AGENTS.md).
 
-The package is developed on a **DGX Spark (NVIDIA GB10, `aarch64`,
-CUDA 13.0)**. This was previously a **Windows + WSL2 box with an RTX
-5060 (`x86_64`)**, so the old docs and defaults describe a machine that
-is no longer the target. Do not copy the WSL commands verbatim.
+## Environment — DGX Spark (GB10), aarch64
 
-| Concern            | WSL + RTX 5060 (old)                    | DGX Spark GB10 (now)                              |
-|--------------------|-----------------------------------------|---------------------------------------------------|
-| Arch / OS          | `x86_64`, Windows + WSL2                | `aarch64`, Ubuntu 24.04 (`6.17` kernel)           |
-| GPU                | RTX 5060                                | GB10 (Grace Blackwell, `sm_121`), driver `580.159`|
-| CUDA               | 12.x                                    | 13.0 (`nvcc` V13.0.88)                            |
-| Venv               | `~/ml-venv` under WSL                   | `distill/.venv` (uv, Python 3.12)                 |
-| Repo mount path    | `/mnt/d/project/moebius_distill`        | `/home/dog/project/moebius_distill`               |
-| Data root          | `D:/datasets/...` (Windows junction)    | `/home/dog/datasets`                              |
-| Inference venv     | HAMI `~/ml-venv`                        | HAMI `.venv` (separate; do not mix)               |
+| Concern  | Value                                                    |
+|----------|----------------------------------------------------------|
+| Arch/OS  | `aarch64`, Ubuntu 24.04, CUDA 13.0, `sm_121`             |
+| Venv     | `.venv` (uv, Python 3.12.3, torch 2.13.0+cu130)          |
+| RAM      | 121 GB — budget runs against an **80 GB peak**           |
+| GPU      | GB10, driver 580.159                                     |
 
-There is no `/mnt/d`, no `D:/`, and no `~/ml-venv` on this box. Anything
-that still references those paths is stale; the `_candidate_roots()`
-helpers in the test conftests and `teachers/loader.py` list the local
-path **first** and keep the WSL/Windows forms only as fallbacks.
+Import-time traps (not optional, even when unused):
+- `flash-linear-attention` — `Moebius/model_lib/__init__.py` imports it; without it the teacher will not load.
+- `onnxscript` — required by `torch.onnx.export` on torch 2.13.
 
-### Install (one-time)
+`huggingface.co` is **unreachable** from this box. Use `hf-mirror.com`
+(wired into `src/moebius_finetune/training/student/elatentlpips_setup.py`).
 
-```bash
-cd /home/dog/project/moebius_distill/distill
-uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python -e .          # numpy, pyyaml, Pillow
-uv pip install --python .venv/bin/python "pytest>=7.0" "pytest-cov>=4.0"
-uv pip install --python .venv/bin/python \
-    "torch==2.13.0" "diffusers==0.39.0" transformers accelerate safetensors \
-    omegaconf timm tqdm einops opencv-python-headless scipy orjson toml pandas \
-    "flash-linear-attention==0.3.2" \
-    matplotlib onnx onnxruntime onnxscript
+## Structure
+
+```
+distill/
+├── AGENTS.md                 # this file
+├── pyproject.toml            # moebius-finetune v0.0.1; 8 console scripts
+├── .github/workflows/ci.yml  # 2 jobs: cpu-contract-tests, ml-cpu-tests
+├── configs/                  # YAML configs; paths.local.yaml git-ignored
+├── ckpt/                     # symlinks → /home/dog/datasets/.../elatentlpips_ckpt/
+├── scripts/                  # driver scripts (NOT installable); see scripts/AGENTS.md
+├── docs/                     # architecture.md, development.md
+└── src/moebius_finetune/
+    ├── __init__.py           # flat re-export of contracts
+    ├── contracts.py          # public API (ConditionBatch, SampleManifest, …)
+    ├── cli.py                # 8 entry points; 3 implemented, 5 stubs
+    ├── data/                 # GRT dataset, ZipDepth, manifest IO
+    ├── deployment/           # budget, ONNX/RKNN export, LPDDR4X bandwidth
+    ├── evaluation/           # hole/global L1, masked LPIPS, evaluator
+    ├── students/             # student archs; see students/AGENTS.md
+    ├── teachers/             # Moebius wrapper, depth adapter, loader
+    └── training/
+        ├── codec/
+        ├── student/          # distillation loop; see training/student/AGENTS.md
+        └── teacher/          # finetune, cache, recipe
 ```
 
-Notes that cost time to rediscover:
+## Where to look
 
-* `torch==2.13.0` from the configured mirror resolves to the
-  `+cu130` aarch64 build on this box (this is what HAMI's venv also
-  has). `torch.cuda.is_available()` is `True` and `sm_121` matmuls run.
-* `flash-linear-attention` is required at **import** time by
-  `Moebius/model_lib/__init__.py`, even though the 9-channel teacher
-  path never calls the GLA branch. Without it the teacher will not load.
-* `Pillow`, `matplotlib`, `onnx`, `onnxruntime`, and `onnxscript` are
-  imported at module top level by the data pipeline / evaluation /
-  deployment subpackages. `onnxscript` in particular is required by
-  `torch.onnx.export` on torch 2.13; without it the ONNX exporter
-  raises `ModuleNotFoundError`.
-* `uv` is configured against the Tsinghua mirror
-  (`UV_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`); no manual
-  index flags are needed.
+| Task | Location | Notes |
+|------|----------|-------|
+| Cross-module API | `src/moebius_finetune/contracts.py` | `ConditionBatch`, `SampleManifest`, `Split`, `Direction`, `CoordFrame`, `DepthNormalization`, `to_torch`, `inpaint`, `validate_condition`, `ConditionContractError` |
+| GRT case building | `src/moebius_finetune/data/grt_dataset.py` → `build_case(case, *, image_dir, predictor=None, size=512, disp=None)` | Returns `rgb_hole`, `hole_mask`, `depth_hole`, `target`, `hole_ratio`. Disparity is never persisted. |
+| Student model | `src/moebius_finetune/students/moebius_small.py` → `MoebiusSmallStudent` (NOT in `students/__init__.py`) | 10.16M params / 6.58 GMac at `[1,9,64,64]` |
+| Distillation loop | `src/moebius_finetune/training/student/train_small.py` → `train(cfg, log, *, student, taesd, teacher, lpips, ...)` | Inject all heavy components. EMA in RAM only. |
+| Loss book | `src/moebius_finetune/training/student/multigranular.py` | Four-term loss + adaptive grad-norm weights |
+| Hole-fill prompt | `src/moebius_finetune/training/student/prompt.py` → `HOLE_FILL_VALUE = 0.5`, `build_masked_prompt` | **Single source of truth** — change here, nowhere else |
+| LPIPS staging | `src/moebius_finetune/training/student/elatentlpips_setup.py` → `load_elatentlpips()` | Mirror fetch from hf-mirror.com; ninja/JIT disabled |
+| Budget / MACs | `src/moebius_finetune/deployment/budget.py` → `compute_algorithm_macs(model, spec, *, adapter=None)` | Fails closed on unknown ops. Pass `adapter` for non-default forward signatures |
+| Eval driver | `scripts/eval_moebius_small.py` | 32-case GRT holdout, 10-step DDIM, seed 12345; fixes the row-0 mask bug |
+| Quick test loop | `pytest tests/test_contracts.py tests/test_config.py tests/data/ -q` | 157 tests, ~1.2s, no torch |
+| Student loop | `pytest tests/students tests/training/student -q` | 133 tests, ~40s |
 
-### Run the tests
+## Public API surface (`moebius_finetune`)
+
+Re-exported from root: the 10 names in `contracts.py` plus (via
+`students/__init__.py`) `InvertedResidualBlock`, `ContextBlock`,
+`DownsampleBlock`, `UpsampleBlock`, `TailRefineBlock`, `fuse_bn`,
+`LatentStudentV0`, `LightweightCodec`, `OneStepLatentNet`,
+`MobileMoebius`, `PixelStudentV0`.
+
+**Not re-exported (must import directly):**
+- `MoebiusSmallStudent`, `StudentOutput`, `SinusoidalTimeEmbedding` ← `students.moebius_small`
+- `GatedDW7Block` ← `students.gated`
+- `train`, `TrainConfig`, `main` ← `training.student.train_small`
+- `FeatureProjections`, `cal_*`, `total_loss`, `ELATENTLPIPS_INPUT_SCALE` ← `training.student.multigranular`
+- `HOLE_FILL_VALUE`, `build_masked_prompt` ← `training.student.prompt`
+- `load_elatentlpips`, `ensure_ckpt_dir`, `fetch_tuned_checkpoint` ← `training.student.elatentlpips_setup`
+
+## Env vars
+
+| Variable | Value | Fallback |
+|----------|-------|----------|
+| `MOEBIUS_UPSTREAM_DIR` | `/home/dog/project/moebius_distill/Moebius` | probed via `_candidate_roots()` (local first, then WSL/Windows forms) |
+| `MOEBIUS_WEIGHTS_PATH` | `.../Moebius/weights/moebius/pretrained/diffusion_pytorch_model.bin` | conftest skip if missing |
+| `ELATENTLPIPS_CKPT_DIR` | `/home/dog/datasets/moebius_finetune/elatentlpips_ckpt` | default in `elatentlpips_setup.py` |
+| `ZIPDEPTH_UPSTREAM_DIR` | `/home/dog/project/moebius_distill/ZipDepth` | candidates in `grt_dataset.resolve_zipdepth_dir()` |
+| `ELATENTLPIPS_CKPT_DIR` | see above | — |
+
+`configs/paths.local.yaml` (git-ignored) holds this box's real paths.
+
+## Data & runs
+
+```
+/home/dog/datasets/moebius_finetune/
+├── disparity/          # per-image ZipDepth .npy cache
+├── grt_manifest.json   # 12,204 GRT cases (train/eval split)
+├── elatentlpips_ckpt/  # 1.1 GB shim + tuned checkpoint
+└── runs/<run_name>/    # final.pt, step_*.pt, train.log, eval*.json, viz/, REPORT.md
+```
+
+`build_512_sample` / `build_case` read `<data_root>/disparity/<id>.npy`
+and raise `FileNotFoundError` on miss. **Eval holdout runs ZipDepth
+online** — no second cache (user directive).
+
+`runs/` is outside the repo and holds hand-written teacher drivers
+(`taesdxl_moebius_ft/full_ft_v1.py`, `eval_trajectory.py`) that contain
+two real bugs. Do not copy; the corrected forms live in `scripts/`.
+
+## Critical gotchas — read before touching training or eval
+
+### 1. Hole-fill is mid-gray, NOT black
+
+- In `[-1,1]` the hole must be at **0**; in `[0,1]` that is **0.5**.
+- `grt_dataset.build_case` deliberately returns a black hole (`rgb*(1-mask)`); other consumers rely on this. Do not "fix" it.
+- Fill is applied where the **prompt** is assembled. **Single source of truth**: `src/moebius_finetune/training/student/prompt.py` (`HOLE_FILL_VALUE = 0.5`, `build_masked_prompt`). Wired into `train_small._to_latents`, `scripts/eval_moebius_small.py`, `scripts/viz_moebius_small.py`.
+- Measured full-hole L1, 32 GRT holdout, same teacher/noise: **black 0.562 vs mid-gray 0.217**.
+
+### 2. EMA is unusable at these step counts
+
+`ema_decay=0.9999` over ~3000 steps leaves ~74 % weight on the random
+init. **Always evaluate and deploy `model_state`, never `ema_state`**
+(pass `--state model_state`).
+
+### 3. KD is effectively inert in the current weighting
+
+`multigranular.py:243` — `cal_adaptive_weights` sets `feat_weight_task
+= ‖∇featkd‖ / (‖∇task‖ + 1e-4)` but the numerator is missing the
+`KD_loss_weight` factor upstream `cal_adaptive_weights_type8` has. The
+weight pins to the `1e4` clamp ceiling by ~step 150; `outkd`/`featkd`
+get ~1-4 % of gradient vs ~50 % each for task and LPIPS. Treat
+"distillation" in a run's name as a claim to verify, not a fact.
+
+### 4. E-LatentLPIPS input scale is pinned
+
+`ELATENTLPIPS_INPUT_SCALE = 1.0` in `multigranular.py` with the library
+called via `normalize=False`. The library's default double-normalises
+our TAESDXL latents (post-BN std **0.309** vs correct **0.730**). Do
+not "simplify" this away.
+
+### 5. Latent mask uses `mode="nearest"` to 64×64
+
+The `bilinear` in `train_distillation.py:317` belongs to the PixelHacker
+pipeline and does **not** apply here.
+
+### 6. Metric convention
+
+`mask_t[0, 0] > 0.5` (legacy `eval_trajectory.py:97`) on `[1,H,W]`
+selects **image row 0**, not the mask; it returns fake `0.0` whenever
+the hole misses the top row (8 of 32 cases). **Correct form** is
+`mask_t[0]` — implemented in `scripts/eval_moebius_small.py::_hole_l1`.
+
+Reference values under the **correct** metric (full-hole L1, `[-1,1]`
+units, 32 holdout cases, 10-step DDIM, noise seed 12345):
+
+| Object                         | Value |
+|--------------------------------|-------|
+| Teacher @ mid-gray (correct)   | 0.217 |
+| Oracle in-hole mean-fill       | 0.322 |
+| Warp left as-is                | 0.365 |
+| Teacher @ black                | 0.562 |
+| Best student so far (v1 @6000) | 0.372 |
+
+A student at 0.372 has **not** beaten constant mean-fill. Judge new
+numbers against this table, not against the old `≤0.105` bar.
+
+## Conventions
+
+- **CPU tests must not import torch, diffusers, transformers, onnx, or
+  rknn at module top level.** Lazy-import inside the test or skip.
+- `tests/` mirrors `src/moebius_finetune/` subpackage-by-subpackage.
+- Conftest exists only in `tests/teachers/`,
+  `tests/training/student/`, `tests/training/teacher/` (none at top).
+- `contracts.py` is the cross-module public API. Changing it means
+  updating dependants **and** `tests/test_contracts.py` in the same
+  change.
+- `pyproject.toml` extras groups `data`, `teacher`, `student`, `deploy`
+  are placeholders; only `dev` and `eval` carry deps today.
+- `scripts/` are **not** registered as console scripts. They use
+  `sys.path.insert` to find upstream Moebius + TAESDXL — they're driver
+  scripts in the tradition of the upstream `runs/` folder.
+
+## Anti-patterns — explicitly forbidden
+
+- **DO NOT modify** `Moebius/`, `PixelHacker/`, `ZipDepth/`, `m2svid/`, `Hybrid-SD/`, `tdd/` (upstream).
+- **DO NOT modify** the existing tests/ files in this repo unless
+  tracked; new tests only under the existing subdirs.
+- **DO NOT** persist disparity, latents, EMA cache, or any training
+  intermediate state to disk.
+- **DO NOT** change `HOLE_FILL_VALUE` outside `training/student/prompt.py`.
+- **DO NOT** evaluate/deploy `ema_state` at these step counts.
+- **DO NOT** fall back to `mask_t[0, 0]` for in-hole metrics.
+- **DO NOT** introduce new dependencies outside `[project.optional-dependencies]` without a plan-doc entry.
+
+## Commands
 
 ```bash
 cd /home/dog/project/moebius_distill/distill
+
+# Fast subset, no torch (157 tests, ~1.2s)
+pytest tests/test_contracts.py tests/test_config.py tests/data/ -q
+
+# Student-focused loop (133 tests, ~40s)
+pytest tests/students tests/training/student -q
+
+# Full suite (482 tests, slow; loads 226M teacher)
 MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
   .venv/bin/python -m pytest tests/ -q
+
+# Eval a student checkpoint (uses corrected row-0 metric)
+cd distill && MOEBIUS_UPSTREAM_DIR=/home/dog/project/moebius_distill/Moebius \
+  .venv/bin/python scripts/eval_moebius_small.py --teacher-check
 ```
 
-The environment variables the code reads, and their local values:
+## Notes
 
-| Variable                     | Value on this box                                                  |
-|------------------------------|--------------------------------------------------------------------|
-| `MOEBIUS_UPSTREAM_DIR`       | `/home/dog/project/moebius_distill/Moebius`                         |
-| `MOEBIUS_WEIGHTS_PATH`       | `.../Moebius/weights/moebius/pretrained/diffusion_pytorch_model.bin`|
+- `README.md` quick-start is **stale** (still shows `wsl.exe` and
+  `/mnt/d/...`). It also claims the repo has no remote — there is a
+  remote (`origin git@github.com:BruceYeung22/distill_mb.git`).
+- `docs/development.md` retains WSL/Windows language. Use the actual
+  paths here, not the docs.
+- `src/moebius_finetune.egg-info/` is at the project root, not under `src/` — harmless.
+- `logs/` (inside the repo) has stray PNG comparison grids; `.gitignore`
+  excludes `/logs/` but those were committed before the rule.
 
-Both have working fallbacks (the loader and conftests probe the local
-path first), so exporting them is optional — but explicit is safer.
+## Subpackage AGENTS.md
 
-The full suite loads the 226M-parameter teacher several times and takes
-**~6 minutes** on this box (it was skipped entirely in CI-less runs
-before the weight path was fixed). The CPU-only contract subset
-(`tests/test_contracts.py tests/test_config.py tests/data/`) still runs
-in under a second and needs only numpy + pyyaml + Pillow + pytest.
-
-### Real paths
-
-`configs/paths.local.yaml` (git-ignored) holds this box's real paths:
-teacher checkpoint, ZipDepth checkpoint, COCO directories, and the
-disparity cache root. `configs/paths.example.yaml` stays a placeholder.
-
-### Real-data pipeline prerequisite: the disparity cache
-
-`data.pipeline_512.build_512_sample` reads disparity from
-`<data_root>/disparity/<image_id>.npy` (or `.pt`); it does **not** run
-ZipDepth itself. Without that cache every call raises
-`FileNotFoundError` pointing at the cache step. On this box the cache
-was produced by running `ZipDepth/checkpoints/zipdepth_base.pth` over
-the 512-resized COCO images, e.g. for one image:
-
-```python
-import sys, numpy as np
-from PIL import Image
-sys.path.insert(0, "/home/dog/project/moebius_distill/ZipDepth")
-from zipdepth.inference.predictor import DepthInference
-inf = DepthInference(
-    checkpoint_path="/home/dog/project/moebius_distill/ZipDepth/checkpoints/zipdepth_base.pth",
-    device="cuda",
-)
-arr = np.asarray(Image.open("<coco>/<image_id>.jpg").convert("RGB").resize((512, 512)))
-d = inf.infer_image(arr[:, :, ::-1].astype(np.uint8))   # predictor wants BGR uint8
-np.save("<data_root>/disparity/<image_id>.npy", d.astype(np.float32))
-```
-
-A 6-image sample already exists under
-`/home/dog/datasets/coco32_grt_local/` (disparity cache + 12 built
-cases + `manifest.json`); it is a smoke fixture, not a training set.
-The full upstream dataset build lives in the sibling **HAMI** project
-(`scripts/prepare_coco32_grt.py`, `scripts/build_grt_train_set.py`),
-whose `ZipDepthDisparity` adapter wraps the same checkpoint.
-
-## File ownership
-
-| Owner       | Path inside `finetune/src/moebius_finetune/`                                  | Notes                                |
-|-------------|------------------------------------------------------------------------------|--------------------------------------|
-| Stage 0     | `__init__.py`, `contracts.py`, `cli.py`                                       | Public surface. Change via PR only.  |
-| Stage 0     | `data/__init__.py`, `teachers/__init__.py`, `students/__init__.py`           | Empty placeholders.                  |
-| Stage 0     | `evaluation/__init__.py`, `deployment/__init__.py`, `training/__init__.py`   | Empty placeholders.                  |
-| Agent A     | everything else under `data/` and `evaluation/`                              | Manifest, GRT, datasets, metrics.    |
-| Agent B     | everything else under `teachers/` and `training/teacher/`                     | Moebius adapter, fine-tune, cache.   |
-| Agent C     | everything else under `students/`, `training/codec/`, `training/student/`, `deployment/` | Codec, students, ONNX/RKNN. |
-
-Configuration files under `configs/` are owned by stage 0; B and C may
-extend them, but the loader and the path-registration helpers stay
-under stage 0's control.
-
-## Public-contract change flow
-
-Anything exported from `moebius_finetune.contracts` (`ConditionBatch`,
-`SampleManifest`, `Split`, `Direction`, `CoordFrame`,
-`DepthNormalization`, `to_torch`, `inpaint`, `validate_condition`,
-`ConditionContractError`) is part of the cross-agent API. To change
-it:
-
-1. Open a PR describing the breaking change, the impacted subpackages
-   and the migration plan.
-2. Wait for the orchestrator (stage 0 owner) to confirm.
-3. Update the contract, the dependent agent's tests, and the
-   `tests/test_contracts.py` synthetic fixtures in the same PR.
-4. Re-run the CPU test suite locally and in CI.
-
-The same rule applies to any new shared dataclass, enum or helper that
-will be consumed by more than one of the A/B/C subpackages.
-
-## Tests
-
-* CPU tests live in `tests/` and must not `import torch`, `diffusers`,
-  `transformers`, `onnx`, or `rknn` at module top level. Heavy
-  dependencies are imported inside the test that needs them and are
-  skipped if unavailable.
-* Subpackage-specific tests belong inside the owning subpackage's
-  `tests/` directory once the package owns a `tests/` folder.
-* The reference plan in `tdd/moebius-depth-finetune-distill-2026-09-12-05-38-54.md`
-  is the source of truth. Section numbers in commit messages and
-  comments help reviewers locate context quickly.
-
-## Reference
-
-* Architecture overview: `docs/architecture.md`
-* Local dev / how to add a module: `docs/development.md`
-* Frozen development plan (in the parent workspace, **not** this
-  repo): `tdd/moebius-depth-finetune-distill-2026-09-12-05-38-54.md`
+- `src/moebius_finetune/students/AGENTS.md` — student architectures (pixel / latent / mobile / `moebius_small` / `gated` / common).
+- `src/moebius_finetune/training/student/AGENTS.md` — distillation loop, losses, prompt builder, LPIPS staging.
+- `scripts/AGENTS.md` — eval / viz drivers.
